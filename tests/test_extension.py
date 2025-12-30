@@ -172,6 +172,59 @@ def test_open_message_action() -> TestResult:
     return TestResult("open_message_action", False, "Failed to queue open_message action")
 
 
+def test_archive_action() -> TestResult:
+    """Test that archive batch action can be queued."""
+    result = api_post("/tbird-sync/archive", {
+        "messageIds": ["test1@example.com", "test2@example.com"]
+    })
+    if result is not None and result.get("status") == "queued":
+        return TestResult("archive_action", True, f"archive queued for {result.get('count')} messages")
+    return TestResult("archive_action", False, "Failed to queue archive action")
+
+
+def test_move_action() -> TestResult:
+    """Test that move batch action can be queued."""
+    result = api_post("/tbird-sync/move", {
+        "messageIds": ["test1@example.com"],
+        "folder": "Archive"
+    })
+    if result is not None and result.get("status") == "queued":
+        return TestResult("move_action", True, f"move queued to {result.get('folder')}")
+    return TestResult("move_action", False, "Failed to queue move action")
+
+
+def test_create_draft_action() -> TestResult:
+    """Test that create_draft action can be queued."""
+    result = api_post("/tbird-sync/create-draft", {
+        "messageId": "test-draft@example.com",
+        "body": "Test reply content",
+        "replyAll": False
+    })
+    if result is not None and result.get("status") == "queued":
+        return TestResult("create_draft_action", True, "create_draft action can be queued")
+    return TestResult("create_draft_action", False, "Failed to queue create_draft action")
+
+
+def test_send_reply_safety() -> TestResult:
+    """Test that send_reply requires confirmation."""
+    # Should fail without confirmed=true
+    result = api_post("/tbird-sync/send-reply", {
+        "messageId": "test-send@example.com",
+        "body": "Test reply"
+    })
+    if result is None or "error" in result:
+        return TestResult("send_reply_safety", True, "send_reply correctly requires confirmation")
+    return TestResult("send_reply_safety", False, "send_reply should require confirmation")
+
+
+def test_folders_discovery() -> TestResult:
+    """Test that folder discovery can be queued."""
+    result = api_get("/tbird-sync/folders")
+    if result is not None and result.get("status") == "queued":
+        return TestResult("folders_discovery", True, "folders discovery can be queued")
+    return TestResult("folders_discovery", False, "Failed to queue folders discovery")
+
+
 def run_tests(quick: bool = False) -> list[TestResult]:
     """Run all tests."""
     tests = [
@@ -181,6 +234,11 @@ def run_tests(quick: bool = False) -> list[TestResult]:
         test_queue_endpoint,
         test_complete_endpoint,
         test_open_message_action,
+        test_archive_action,
+        test_move_action,
+        test_create_draft_action,
+        test_send_reply_safety,
+        test_folders_discovery,
         lambda: test_extension_polling(quick),
     ]
 

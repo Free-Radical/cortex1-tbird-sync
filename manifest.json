@@ -1,7 +1,7 @@
 {
   "manifest_version": 2,
   "name": "Cortex1 Thunderbird Sync",
-  "version": "1.2.0",
+  "version": "1.3.0",
   "description": "Syncs message status with Thunderbird via polling",
   "author": "Saqib A Khan",
   "homepage_url": "https://github.com/Free-Radical/cortex1-tbird-sync",
@@ -14,7 +14,9 @@
   "permissions": [
     "messagesRead",
     "messagesUpdate",
+    "messagesMove",
     "accountsRead",
+    "compose",
     "storage"
   ],
   "background": {
