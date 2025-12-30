@@ -1,27 +1,19 @@
 /**
  * Cortex1 Thunderbird Sync - Background Script
  *
- * Receives commands from native messaging host and updates message status
- * in Thunderbird using the messenger.messages API.
- *
- * Supported commands:
- *   - mark_read: Mark message as read by Message-ID header
- *   - mark_unread: Mark message as unread
- *   - mark_flagged: Toggle flagged status
- *   - get_status: Get current message status
+ * Polls cortex_server for pending sync commands and executes them.
+ * No native messaging required - just install the .xpi.
  */
 
-const NATIVE_HOST = "cortex1_tbird_sync";
+const CORTEX_SERVER = "http://localhost:5001";
+const POLL_INTERVAL_MS = 3000;  // Poll every 3 seconds
 
-let port = null;
+let isPolling = false;
 
 /**
  * Find a message by its Message-ID header
- * @param {string} messageId - The Message-ID header value
- * @returns {Promise<object|null>} The message object or null if not found
  */
 async function findMessageByHeaderId(messageId) {
-    // Clean up message ID - remove angle brackets if present
     let cleanId = messageId.trim();
     if (cleanId.startsWith("<")) cleanId = cleanId.slice(1);
     if (cleanId.endsWith(">")) cleanId = cleanId.slice(0, -1);
@@ -30,11 +22,7 @@ async function findMessageByHeaderId(messageId) {
         const result = await messenger.messages.query({
             headerMessageId: cleanId
         });
-
-        if (result.messages && result.messages.length > 0) {
-            return result.messages[0];
-        }
-        return null;
+        return result.messages && result.messages.length > 0 ? result.messages[0] : null;
     } catch (error) {
         console.error("Error finding message:", error);
         return null;
@@ -43,15 +31,12 @@ async function findMessageByHeaderId(messageId) {
 
 /**
  * Mark a message as read
- * @param {string} messageId - The Message-ID header value
- * @returns {Promise<object>} Result with success status
  */
 async function markAsRead(messageId) {
     const message = await findMessageByHeaderId(messageId);
     if (!message) {
         return { success: false, error: "Message not found", messageId };
     }
-
     try {
         await messenger.messages.update(message.id, { read: true });
         return { success: true, messageId, action: "mark_read" };
@@ -62,15 +47,12 @@ async function markAsRead(messageId) {
 
 /**
  * Mark a message as unread
- * @param {string} messageId - The Message-ID header value
- * @returns {Promise<object>} Result with success status
  */
 async function markAsUnread(messageId) {
     const message = await findMessageByHeaderId(messageId);
     if (!message) {
         return { success: false, error: "Message not found", messageId };
     }
-
     try {
         await messenger.messages.update(message.id, { read: false });
         return { success: true, messageId, action: "mark_unread" };
@@ -80,17 +62,13 @@ async function markAsUnread(messageId) {
 }
 
 /**
- * Toggle or set flagged status
- * @param {string} messageId - The Message-ID header value
- * @param {boolean} flagged - Whether to flag or unflag
- * @returns {Promise<object>} Result with success status
+ * Set flagged status
  */
 async function setFlagged(messageId, flagged) {
     const message = await findMessageByHeaderId(messageId);
     if (!message) {
         return { success: false, error: "Message not found", messageId };
     }
-
     try {
         await messenger.messages.update(message.id, { flagged: flagged });
         return { success: true, messageId, action: "set_flagged", flagged };
@@ -100,94 +78,68 @@ async function setFlagged(messageId, flagged) {
 }
 
 /**
- * Get current status of a message
- * @param {string} messageId - The Message-ID header value
- * @returns {Promise<object>} Message status or error
+ * Process a single command
  */
-async function getStatus(messageId) {
-    const message = await findMessageByHeaderId(messageId);
-    if (!message) {
-        return { success: false, error: "Message not found", messageId };
-    }
-
-    return {
-        success: true,
-        messageId,
-        status: {
-            read: message.read,
-            flagged: message.flagged,
-            subject: message.subject,
-            author: message.author,
-            date: message.date
-        }
-    };
-}
-
-/**
- * Handle incoming command from native messaging host
- * @param {object} command - The command object
- */
-async function handleCommand(command) {
-    console.log("Received command:", command);
-
-    let result;
-
-    switch (command.action) {
+async function processCommand(cmd) {
+    switch (cmd.action) {
         case "mark_read":
-            result = await markAsRead(command.messageId);
-            break;
+            return await markAsRead(cmd.messageId);
         case "mark_unread":
-            result = await markAsUnread(command.messageId);
-            break;
+            return await markAsUnread(cmd.messageId);
         case "set_flagged":
-            result = await setFlagged(command.messageId, command.flagged !== false);
-            break;
-        case "get_status":
-            result = await getStatus(command.messageId);
-            break;
-        case "ping":
-            result = { success: true, action: "pong", version: "1.0.0" };
-            break;
+            return await setFlagged(cmd.messageId, cmd.flagged !== false);
         default:
-            result = { success: false, error: "Unknown action: " + command.action };
+            return { success: false, error: "Unknown action: " + cmd.action };
     }
-
-    // Send result back through native messaging
-    if (port) {
-        port.postMessage(result);
-    }
-
-    return result;
 }
 
 /**
- * Connect to native messaging host
+ * Poll cortex_server for pending commands
  */
-function connectToNativeHost() {
+async function pollForCommands() {
+    if (isPolling) return;
+    isPolling = true;
+
     try {
-        port = messenger.runtime.connectNative(NATIVE_HOST);
-
-        port.onMessage.addListener((message) => {
-            handleCommand(message);
+        const response = await fetch(`${CORTEX_SERVER}/tbird-sync/pending`, {
+            method: "GET",
+            headers: { "Accept": "application/json" }
         });
 
-        port.onDisconnect.addListener(() => {
-            console.log("Native host disconnected");
-            port = null;
-            // Attempt to reconnect after a delay
-            setTimeout(connectToNativeHost, 5000);
-        });
+        if (!response.ok) {
+            return;
+        }
 
-        console.log("Connected to native host:", NATIVE_HOST);
+        const data = await response.json();
+        const commands = data.commands || [];
+
+        if (commands.length === 0) {
+            return;
+        }
+
+        console.log(`Processing ${commands.length} sync commands`);
+
+        const results = [];
+        for (const cmd of commands) {
+            const result = await processCommand(cmd);
+            result.id = cmd.id;
+            results.push(result);
+        }
+
+        await fetch(`${CORTEX_SERVER}/tbird-sync/complete`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ results })
+        });
 
     } catch (error) {
-        console.error("Failed to connect to native host:", error);
-        // Retry after delay
-        setTimeout(connectToNativeHost, 10000);
+        // Server not running - silent fail
+    } finally {
+        isPolling = false;
     }
 }
 
-// Initialize connection on startup
-connectToNativeHost();
+setInterval(pollForCommands, POLL_INTERVAL_MS);
+pollForCommands();
 
-console.log("Cortex1 Thunderbird Sync extension loaded");
+console.log("Cortex1 Thunderbird Sync loaded - polling every " + (POLL_INTERVAL_MS/1000) + "s");

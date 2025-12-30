@@ -2,8 +2,9 @@
   "manifest_version": 2,
   "name": "Cortex1 Thunderbird Sync",
   "version": "1.0.0",
-  "description": "Enables external applications to sync message status (read, replied, flagged) with Thunderbird",
+  "description": "Syncs message status between Thunderbird and external applications via polling",
   "author": "Saqib A Khan",
+  "homepage_url": "https://github.com/alphakhan-ai/cortex1-tbird-sync",
   "applications": {
     "gecko": {
       "id": "cortex1-tbird-sync@cortex1.dev",
@@ -14,8 +15,7 @@
     "messagesRead",
     "messagesUpdate",
     "accountsRead",
-    "storage",
-    "nativeMessaging"
+    "storage"
   ],
   "background": {
     "scripts": ["background.js"]
