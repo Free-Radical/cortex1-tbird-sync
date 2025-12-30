@@ -1,10 +1,10 @@
 {
   "manifest_version": 2,
   "name": "Cortex1 Thunderbird Sync",
-  "version": "1.0.0",
-  "description": "Syncs message status between Thunderbird and external applications via polling",
+  "version": "1.1.0",
+  "description": "Syncs message status and handles thunderlink:// URLs for Thunderbird",
   "author": "Saqib A Khan",
-  "homepage_url": "https://github.com/alphakhan-ai/cortex1-tbird-sync",
+  "homepage_url": "https://github.com/Free-Radical/cortex1-tbird-sync",
   "applications": {
     "gecko": {
       "id": "cortex1-tbird-sync@cortex1.dev",
@@ -15,7 +15,15 @@
     "messagesRead",
     "messagesUpdate",
     "accountsRead",
-    "storage"
+    "storage",
+    "tabs"
+  ],
+  "protocol_handlers": [
+    {
+      "protocol": "thunderlink",
+      "name": "ThunderLink Message Handler",
+      "uriTemplate": "https://thunderlink.invalid/?msgid=%s"
+    }
   ],
   "background": {
     "scripts": ["background.js"]
