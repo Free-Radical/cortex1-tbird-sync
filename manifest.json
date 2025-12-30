@@ -1,8 +1,8 @@
 {
   "manifest_version": 2,
   "name": "Cortex1 Thunderbird Sync",
-  "version": "1.1.0",
-  "description": "Syncs message status and handles thunderlink:// URLs for Thunderbird",
+  "version": "1.1.1",
+  "description": "Syncs message status with Thunderbird via polling",
   "author": "Saqib A Khan",
   "homepage_url": "https://github.com/Free-Radical/cortex1-tbird-sync",
   "applications": {
@@ -15,15 +15,7 @@
     "messagesRead",
     "messagesUpdate",
     "accountsRead",
-    "storage",
-    "tabs"
-  ],
-  "protocol_handlers": [
-    {
-      "protocol": "thunderlink",
-      "name": "ThunderLink Message Handler",
-      "uriTemplate": "https://thunderlink.invalid/?msgid=%s"
-    }
+    "storage"
   ],
   "background": {
     "scripts": ["background.js"]
