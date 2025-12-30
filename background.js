@@ -78,7 +78,7 @@ async function setFlagged(messageId, flagged) {
 }
 
 /**
- * Open/display a message in Thunderbird
+ * Open/display a message in a new Thunderbird window
  */
 async function openMessage(messageId) {
     const message = await findMessageByHeaderId(messageId);
@@ -86,9 +86,10 @@ async function openMessage(messageId) {
         return { success: false, error: "Message not found", messageId };
     }
     try {
+        // Open message in a new window
         await messenger.messageDisplay.open({
             messageId: message.id,
-            location: "tab"
+            location: "window"
         });
         return { success: true, messageId, action: "open_message" };
     } catch (error) {
@@ -163,4 +164,4 @@ async function pollForCommands() {
 setInterval(pollForCommands, POLL_INTERVAL_MS);
 pollForCommands();
 
-console.log("Cortex1 Thunderbird Sync v1.1.1 loaded - polling every " + (POLL_INTERVAL_MS/1000) + "s");
+console.log("Cortex1 Thunderbird Sync v1.2.0 loaded - polling every " + (POLL_INTERVAL_MS/1000) + "s");
