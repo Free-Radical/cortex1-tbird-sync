@@ -1,0 +1,7 @@
+{
+  "name": "cortex1_tbird_sync",
+  "description": "Cortex1 Thunderbird Sync Native Messaging Host",
+  "path": "C:\\Users\\alpha\\Documents\\GitHub\\cortex1-tbird-sync\\native_host\\cortex1_tbird_sync.bat",
+  "type": "stdio",
+  "allowed_extensions": ["cortex1-tbird-sync@cortex1.dev"]
+}

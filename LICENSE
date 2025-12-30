@@ -1,0 +1,170 @@
+Business Source License 1.1
+
+License text copyright © 2017 MariaDB Corporation Ab, All Rights Reserved.
+"Business Source License" is a trademark of MariaDB Corporation Ab.
+
+-------------------------------------------------------------------------------
+PARAMETERS
+-------------------------------------------------------------------------------
+
+Licensor:
+  Saqib Ali Khan
+
+Licensed Work:
+  Cortex1-ZeroVeil (the "Licensed Work"), including all source code,
+  documentation, designs, architecture specifications, and related intellectual
+  property contained in this repository.
+
+Additional Use Grant:
+  This Additional Use Grant clarifies what constitutes permitted “Non-Production
+  Use” and what is prohibited.
+
+  1) PERMITTED USE (NON-PRODUCTION)
+     Subject to the Terms of this License, you may use, copy, modify, create
+     derivative works of, and redistribute the Licensed Work solely for
+     Non-Production Use, including:
+       - Personal, hobby, educational, research, or academic purposes; and
+       - Evaluation Use (as defined below).
+
+  2) PROHIBITED USE (NO PRODUCTION / NO COMMERCIAL DEPLOYMENT)
+     You may NOT, without explicit written permission from the Licensor:
+       - Make any Production Use of the Licensed Work;
+       - Offer, provide, or make available the Licensed Work (or any derivative
+         work or substantial functionality of it) as a Service Offering;
+       - Use the Licensed Work for Commercial Advantage (other than Evaluation
+         Use as defined below);
+       - Incorporate, embed, bundle, or distribute the Licensed Work as part of
+         a commercial product, paid offering, or managed solution.
+
+  3) DEFINITIONS (FOR CLARITY)
+     a) "Non-Production Use" means use of the Licensed Work that is strictly
+        limited to development, testing, research, education, demonstration, or
+        evaluation, and that does NOT involve:
+          - processing real end-user/customer/patient/client data in a live
+            service, OR
+          - providing functionality of the Licensed Work to any third party, OR
+          - supporting production workloads, uptime commitments, or business-
+            critical operations.
+
+     b) "Production Use" includes any of the following (whether paid or free):
+          - Use in a live environment to process, transmit, store, or act on
+            real end-user/customer/patient/client data (including logs, prompts,
+            payloads, or identifiers), except where the data is strictly
+            synthetic test data;
+          - Use to support day-to-day internal business operations beyond
+            Evaluation Use (e.g., routing real internal tickets/emails/records);
+          - Use to provide or support any service to third parties (including a
+            free tier, beta, or pilot accessible by third parties);
+          - Use in any environment where the Licensed Work is relied upon for
+            production availability, reliability, or security controls.
+
+     c) "Service Offering" means making the Licensed Work (or any derivative
+        work or substantial set of its features) available to any third party
+        as a hosted, managed, SaaS, API, or similar service, including where
+        access is provided indirectly (e.g., through an app, proxy, gateway,
+        embedded component, or “backend as a service”).
+
+     d) "Commercial Advantage" means any use intended for, directed toward, or
+        resulting in commercial, competitive, operational, or monetary benefit,
+        including internal use by an organization to support its operations or
+        deliver services to others. Commercial Advantage does NOT include
+        Evaluation Use (defined below).
+
+     e) "Evaluation Use" means internal testing and evaluation solely to assess
+        whether to obtain a commercial license from the Licensor, provided that
+        such use:
+          - is limited to non-production environments;
+          - uses only synthetic or properly de-identified test data;
+          - is not exposed to third parties; and
+          - is not used to deliver a product or service.
+
+     f) "Organization" includes any entity (for-profit or non-profit), and all
+        affiliates under common control.
+
+  4) LICENSE INQUIRIES
+     For production, commercial, hosted, embedded, or otherwise prohibited use,
+     contact: Saqib.Khan@Me.com
+
+Change Date:
+  2030-01-01
+
+Change License:
+  Apache License, Version 2.0
+
+Notice:
+  Business Source License 1.1 is not an Open Source license. However, the
+  Licensed Work will eventually be made available under the Change License as
+  stated above.
+
+  Licensor may shorten (but never extend) the Change Date only by publishing a
+  notice in this repository at least 180 days in advance.
+
+-------------------------------------------------------------------------------
+TERMS (BUSL-1.1)
+-------------------------------------------------------------------------------
+
+Terms
+
+The Licensor hereby grants you the right to copy, modify, create derivative
+works, redistribute, and make non-production use of the Licensed Work. The
+Licensor may make an Additional Use Grant, above, permitting limited production
+use.
+
+Effective on the Change Date, or the fourth anniversary of the first publicly
+available distribution of a specific version of the Licensed Work under this
+License, whichever comes first, the Licensor hereby grants you rights under the
+terms of the Change License, and the rights granted in the paragraph above
+terminate.
+
+If your use of the Licensed Work does not comply with the requirements currently
+in effect as described in this License, you must purchase a commercial license
+from the Licensor, its affiliated entities, or authorized resellers, or you
+must refrain from using the Licensed Work.
+
+All copies of the original and modified Licensed Work, and derivative works of
+the Licensed Work, are subject to this License. This License applies separately
+for each version of the Licensed Work and the Change Date may vary for each
+version of the Licensed Work released by Licensor.
+
+You must conspicuously display this License on each original or modified copy
+of the Licensed Work. If you receive the Licensed Work in original or modified
+form from a third party, the terms and conditions set forth in this License
+apply to your use of that work.
+
+Any use of the Licensed Work in violation of this License will automatically
+terminate your rights under this License for the current and all other versions
+of the Licensed Work.
+
+This License does not grant you any right in any trademark or logo of Licensor
+or its affiliates (provided that you may use a trademark or logo of Licensor as
+expressly required by this License).
+
+TO THE EXTENT PERMITTED BY APPLICABLE LAW, THE LICENSED WORK IS PROVIDED ON AN
+"AS IS" BASIS. LICENSOR HEREBY DISCLAIMS ALL WARRANTIES AND CONDITIONS, EXPRESS
+OR IMPLIED, INCLUDING (WITHOUT LIMITATION) WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE, NON-INFRINGEMENT, AND TITLE.
+
+MariaDB hereby grants you permission to use this License's text to license your
+works, and to refer to it using the trademark "Business Source License", as long
+as you comply with the Covenants of Licensor below.
+
+Covenants of Licensor
+
+In consideration of the right to use this License's text and the "Business
+Source License" name and trademark, Licensor covenants to MariaDB, and to all
+other recipients of the licensed work to be provided by Licensor:
+
+  1. To specify as the Change License the GPL Version 2.0 or any later version,
+     or a license that is compatible with GPL Version 2.0 or a later version,
+     where "compatible" means that software provided under the Change License
+     can be included in a program with software provided under GPL Version 2.0
+     or a later version. Licensor may specify additional Change Licenses without
+     limitation.
+
+  2. To either: (a) specify an additional grant of rights to use that does not
+     impose any additional restriction on the right granted in this License, as
+     the Additional Use Grant; or (b) insert the text "None".
+
+  3. To specify a Change Date.
+
+  4. Not to modify this License in any other way.

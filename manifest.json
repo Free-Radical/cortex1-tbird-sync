@@ -1,0 +1,27 @@
+{
+  "manifest_version": 2,
+  "name": "Cortex1 Thunderbird Sync",
+  "version": "1.0.0",
+  "description": "Enables external applications to sync message status (read, replied, flagged) with Thunderbird",
+  "author": "Saqib A Khan",
+  "applications": {
+    "gecko": {
+      "id": "cortex1-tbird-sync@cortex1.dev",
+      "strict_min_version": "115.0"
+    }
+  },
+  "permissions": [
+    "messagesRead",
+    "messagesUpdate",
+    "accountsRead",
+    "storage",
+    "nativeMessaging"
+  ],
+  "background": {
+    "scripts": ["background.js"]
+  },
+  "icons": {
+    "48": "icons/icon-48.png",
+    "96": "icons/icon-96.png"
+  }
+}
