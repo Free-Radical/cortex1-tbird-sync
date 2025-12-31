@@ -296,6 +296,62 @@ async function sendReply(messageId, replyBody, replyAll = false) {
 }
 
 /**
+ * Get message status from Thunderbird
+ * Returns read/flagged status (live from Thunderbird, not stale mbox data)
+ * Note: 'forwarded' is NOT exposed by WebExtension API - only available from X-Mozilla-Status
+ */
+async function getMessageStatus(messageId) {
+    const message = await findMessageByHeaderId(messageId);
+    if (!message) {
+        return { success: false, error: "Message not found", messageId };
+    }
+    return {
+        success: true,
+        messageId,
+        action: "get_status",
+        status: {
+            read: message.read,
+            flagged: message.flagged,
+            junk: message.junk || false,
+            date: message.date,
+            subject: message.subject,
+            author: message.author
+            // Note: 'forwarded' and 'replied' are NOT exposed by Thunderbird WebExtension API
+            // These can only be read from X-Mozilla-Status headers which may be stale
+        }
+    };
+}
+
+/**
+ * Bulk get status for multiple messages
+ */
+async function bulkGetStatus(messageIds) {
+    const results = { success: [], failed: [] };
+
+    for (const msgId of messageIds) {
+        const message = await findMessageByHeaderId(msgId);
+        if (message) {
+            results.success.push({
+                messageId: msgId,
+                read: message.read,
+                flagged: message.flagged,
+                junk: message.junk || false
+            });
+        } else {
+            results.failed.push({ messageId: msgId, error: "Message not found" });
+        }
+    }
+
+    return {
+        success: results.failed.length === 0,
+        action: "bulk_get_status",
+        statuses: results.success,
+        failed: results.failed,
+        count: results.success.length
+    };
+}
+
+/**
  * List available folders (for discovery)
  */
 async function listFolders() {
@@ -352,6 +408,11 @@ async function processCommand(cmd) {
             return await createReplyDraft(cmd.messageId, cmd.body || "", cmd.replyAll === true);
         case "send_reply":
             return await sendReply(cmd.messageId, cmd.body || "", cmd.replyAll === true);
+        // Status queries (get live status from Thunderbird)
+        case "get_status":
+            return await getMessageStatus(cmd.messageId);
+        case "bulk_get_status":
+            return await bulkGetStatus(cmd.messageIds || [cmd.messageId]);
         // Discovery
         case "list_folders":
             return await listFolders();
@@ -409,4 +470,4 @@ async function pollForCommands() {
 setInterval(pollForCommands, POLL_INTERVAL_MS);
 pollForCommands();
 
-console.log("Cortex1 Thunderbird Sync v1.3.0 loaded - polling every " + (POLL_INTERVAL_MS/1000) + "s");
+console.log("Cortex1 Thunderbird Sync v1.4.0 loaded - polling every " + (POLL_INTERVAL_MS/1000) + "s");
