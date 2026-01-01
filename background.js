@@ -5,10 +5,404 @@
  * No native messaging required - just install the .xpi.
  */
 
-const CORTEX_SERVER = "http://localhost:5001";
+const DEFAULT_CORTEX_SERVER = "http://localhost:5001";
+const CORTEX_SERVER_STORAGE_KEY = "cortex_server_url";
 const POLL_INTERVAL_MS = 3000;  // Poll every 3 seconds
 
+// Optional: direct HTTP push of Thunderbird events to cortex_server
+const EVENT_PUSH_PATH = "/tbird-sync/events";
+const EVENT_PUSH_ENABLED_KEY = "cortex_event_push_enabled";
+const EVENT_QUEUE_KEY = "cortex_event_queue_v1";
+const EVENT_QUEUE_META_KEY = "cortex_event_queue_meta_v1";
+const EVENT_QUEUE_LIMIT = 2000;
+const EVENT_BATCH_SIZE = 50;
+const EVENT_FLUSH_INTERVAL_MS = 2000;
+const EVENT_POST_TIMEOUT_MS = 5000;
+
 let isPolling = false;
+let isFlushingEvents = false;
+
+let cachedCortexServerUrl = null;
+let hasLoadedCortexServerUrl = false;
+
+let eventQueue = null;
+let eventQueueMeta = null;
+let persistQueueTimer = null;
+let flushQueueTimer = null;
+let eventSeq = 0;
+
+function getExtensionVersion() {
+    try {
+        return messenger.runtime.getManifest().version;
+    } catch (error) {
+        return "unknown";
+    }
+}
+
+async function getCortexServerUrl() {
+    if (hasLoadedCortexServerUrl) {
+        return cachedCortexServerUrl || DEFAULT_CORTEX_SERVER;
+    }
+
+    try {
+        const stored = await messenger.storage.local.get(CORTEX_SERVER_STORAGE_KEY);
+        const value = stored && stored[CORTEX_SERVER_STORAGE_KEY];
+        cachedCortexServerUrl = (typeof value === "string" && value.trim()) ? value.trim() : DEFAULT_CORTEX_SERVER;
+    } catch (error) {
+        cachedCortexServerUrl = DEFAULT_CORTEX_SERVER;
+    } finally {
+        hasLoadedCortexServerUrl = true;
+    }
+
+    return cachedCortexServerUrl;
+}
+
+async function isEventPushEnabled() {
+    try {
+        const stored = await messenger.storage.local.get(EVENT_PUSH_ENABLED_KEY);
+        const value = stored && stored[EVENT_PUSH_ENABLED_KEY];
+        return value !== false;
+    } catch (error) {
+        return true;
+    }
+}
+
+function createEventId() {
+    try {
+        return crypto.randomUUID();
+    } catch (error) {
+        return `evt_${Date.now()}_${Math.random().toString(16).slice(2)}`;
+    }
+}
+
+function minifyMessageHeader(message) {
+    if (!message) return null;
+    return {
+        id: message.id,
+        headerMessageId: message.headerMessageId,
+        subject: message.subject,
+        author: message.author,
+        recipients: message.recipients,
+        ccList: message.ccList,
+        bccList: message.bccList,
+        date: message.date,
+        read: message.read,
+        flagged: message.flagged,
+        junk: message.junk || false,
+        tags: message.tags
+    };
+}
+
+function minifyFolder(folder) {
+    if (!folder) return null;
+    return {
+        accountId: folder.accountId,
+        path: folder.path,
+        name: folder.name,
+        type: folder.type
+    };
+}
+
+async function ensureEventQueueLoaded() {
+    if (eventQueue !== null && eventQueueMeta !== null) return;
+
+    try {
+        const stored = await messenger.storage.local.get([EVENT_QUEUE_KEY, EVENT_QUEUE_META_KEY]);
+        eventQueue = Array.isArray(stored[EVENT_QUEUE_KEY]) ? stored[EVENT_QUEUE_KEY] : [];
+        eventQueueMeta = stored[EVENT_QUEUE_META_KEY] && typeof stored[EVENT_QUEUE_META_KEY] === "object"
+            ? stored[EVENT_QUEUE_META_KEY]
+            : {};
+    } catch (error) {
+        eventQueue = [];
+        eventQueueMeta = {};
+    }
+
+    if (typeof eventQueueMeta.dropped !== "number") eventQueueMeta.dropped = 0;
+    if (typeof eventQueueMeta.failures !== "number") eventQueueMeta.failures = 0;
+    if (typeof eventQueueMeta.nextAttemptAtMs !== "number") eventQueueMeta.nextAttemptAtMs = 0;
+    if (typeof eventQueueMeta.backoffMs !== "number") eventQueueMeta.backoffMs = 1000;
+}
+
+function schedulePersistQueue() {
+    if (persistQueueTimer) return;
+    persistQueueTimer = setTimeout(async () => {
+        persistQueueTimer = null;
+        try {
+            await messenger.storage.local.set({
+                [EVENT_QUEUE_KEY]: eventQueue || [],
+                [EVENT_QUEUE_META_KEY]: eventQueueMeta || {}
+            });
+        } catch (error) {
+            // best-effort; keep in memory
+        }
+    }, 500);
+}
+
+function scheduleFlushQueue() {
+    if (flushQueueTimer) return;
+    flushQueueTimer = setTimeout(() => {
+        flushQueueTimer = null;
+        flushEventQueue();
+    }, 250);
+}
+
+async function enqueueEvent(eventType, payload) {
+    if (!(await isEventPushEnabled())) return;
+
+    await ensureEventQueueLoaded();
+
+    const event = {
+        event_id: createEventId(),
+        event_type: eventType,
+        ts_ms: Date.now(),
+        seq: (eventSeq += 1),
+        extension_version: getExtensionVersion(),
+        payload
+    };
+
+    eventQueue.push(event);
+
+    if (eventQueue.length > EVENT_QUEUE_LIMIT) {
+        const dropCount = eventQueue.length - EVENT_QUEUE_LIMIT;
+        eventQueue.splice(0, dropCount);
+        eventQueueMeta.dropped += dropCount;
+    }
+
+    schedulePersistQueue();
+    scheduleFlushQueue();
+}
+
+async function postEventBatch(events) {
+    const baseUrl = await getCortexServerUrl();
+    const url = `${baseUrl}${EVENT_PUSH_PATH}`;
+
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), EVENT_POST_TIMEOUT_MS);
+
+    try {
+        const response = await fetch(url, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ events }),
+            signal: controller.signal
+        });
+
+        if (!response.ok) {
+            const err = new Error(`HTTP ${response.status}`);
+            err.status = response.status;
+            throw err;
+        }
+
+        return true;
+    } finally {
+        clearTimeout(timeout);
+    }
+}
+
+async function flushEventQueue() {
+    if (isFlushingEvents) return;
+    if (!(await isEventPushEnabled())) return;
+
+    await ensureEventQueueLoaded();
+
+    if (!eventQueue.length) return;
+
+    const now = Date.now();
+    if (eventQueueMeta.nextAttemptAtMs && now < eventQueueMeta.nextAttemptAtMs) return;
+
+    isFlushingEvents = true;
+    try {
+        const batch = eventQueue.slice(0, EVENT_BATCH_SIZE);
+        await postEventBatch(batch);
+
+        eventQueue.splice(0, batch.length);
+        eventQueueMeta.failures = 0;
+        eventQueueMeta.backoffMs = 1000;
+        eventQueueMeta.nextAttemptAtMs = 0;
+        schedulePersistQueue();
+    } catch (error) {
+        eventQueueMeta.failures += 1;
+        const maxBackoff = 5 * 60 * 1000;
+        const nextBackoff = Math.min(maxBackoff, Math.max(1000, eventQueueMeta.backoffMs || 1000) * 2);
+
+        // If the endpoint isn't implemented yet (404/405), back off more aggressively to avoid constant retries.
+        if (error && (error.status === 404 || error.status === 405)) {
+            eventQueueMeta.backoffMs = Math.max(nextBackoff, 60 * 1000);
+        } else {
+            eventQueueMeta.backoffMs = nextBackoff;
+        }
+
+        eventQueueMeta.nextAttemptAtMs = Date.now() + eventQueueMeta.backoffMs;
+        schedulePersistQueue();
+    } finally {
+        isFlushingEvents = false;
+    }
+}
+
+function safeAddListener(eventObj, handler) {
+    try {
+        if (eventObj && typeof eventObj.addListener === "function") {
+            eventObj.addListener(handler);
+        }
+    } catch (error) {
+        // best-effort; avoid breaking startup on older TB versions
+    }
+}
+
+async function initEventPush() {
+    if (!(await isEventPushEnabled())) return;
+
+    await enqueueEvent("cortex.extension.started", {
+        extension_version: getExtensionVersion()
+    });
+
+    safeAddListener(messenger.messages && messenger.messages.onNewMailReceived, async (folder, messageList) => {
+        const messages = (messageList && messageList.messages) ? messageList.messages : [];
+        await enqueueEvent("messages.onNewMailReceived", {
+            folder: minifyFolder(folder),
+            messages: messages.map(minifyMessageHeader)
+        });
+    });
+
+    safeAddListener(messenger.messages && messenger.messages.onUpdated, async (message, changedProperties, oldProperties) => {
+        await enqueueEvent("messages.onUpdated", {
+            message: minifyMessageHeader(message),
+            changedProperties,
+            oldProperties
+        });
+    });
+
+    safeAddListener(messenger.messages && messenger.messages.onMoved, async (srcFolder, dstFolder, messageList) => {
+        const messages = (messageList && messageList.messages) ? messageList.messages : [];
+        await enqueueEvent("messages.onMoved", {
+            srcFolder: minifyFolder(srcFolder),
+            dstFolder: minifyFolder(dstFolder),
+            messages: messages.map(minifyMessageHeader)
+        });
+    });
+
+    safeAddListener(messenger.messages && messenger.messages.onCopied, async (srcFolder, dstFolder, messageList) => {
+        const messages = (messageList && messageList.messages) ? messageList.messages : [];
+        await enqueueEvent("messages.onCopied", {
+            srcFolder: minifyFolder(srcFolder),
+            dstFolder: minifyFolder(dstFolder),
+            messages: messages.map(minifyMessageHeader)
+        });
+    });
+
+    safeAddListener(messenger.messages && messenger.messages.onDeleted, async (srcFolder, messageList) => {
+        const messages = (messageList && messageList.messages) ? messageList.messages : [];
+        await enqueueEvent("messages.onDeleted", {
+            srcFolder: minifyFolder(srcFolder),
+            messages: messages.map(minifyMessageHeader)
+        });
+    });
+
+    safeAddListener(messenger.messages && messenger.messages.tags && messenger.messages.tags.onCreated, async (tag) => {
+        await enqueueEvent("messages.tags.onCreated", { tag });
+    });
+
+    safeAddListener(messenger.messages && messenger.messages.tags && messenger.messages.tags.onUpdated, async (tag) => {
+        await enqueueEvent("messages.tags.onUpdated", { tag });
+    });
+
+    safeAddListener(messenger.messages && messenger.messages.tags && messenger.messages.tags.onDeleted, async (key) => {
+        await enqueueEvent("messages.tags.onDeleted", { key });
+    });
+
+    safeAddListener(messenger.folders && messenger.folders.onFolderInfoChanged, async (folder) => {
+        await enqueueEvent("folders.onFolderInfoChanged", { folder: minifyFolder(folder) });
+    });
+
+    safeAddListener(messenger.folders && messenger.folders.onCreated, async (folder) => {
+        await enqueueEvent("folders.onCreated", { folder: minifyFolder(folder) });
+    });
+
+    safeAddListener(messenger.folders && messenger.folders.onRenamed, async (folder, oldFolder) => {
+        await enqueueEvent("folders.onRenamed", { folder: minifyFolder(folder), oldFolder: minifyFolder(oldFolder) });
+    });
+
+    safeAddListener(messenger.folders && messenger.folders.onMoved, async (folder, oldFolder) => {
+        await enqueueEvent("folders.onMoved", { folder: minifyFolder(folder), oldFolder: minifyFolder(oldFolder) });
+    });
+
+    safeAddListener(messenger.folders && messenger.folders.onDeleted, async (folder) => {
+        await enqueueEvent("folders.onDeleted", { folder: minifyFolder(folder) });
+    });
+
+    safeAddListener(messenger.accounts && messenger.accounts.onCreated, async (account) => {
+        await enqueueEvent("accounts.onCreated", { accountId: account && account.id, name: account && account.name });
+    });
+
+    safeAddListener(messenger.accounts && messenger.accounts.onUpdated, async (account) => {
+        await enqueueEvent("accounts.onUpdated", { accountId: account && account.id, name: account && account.name });
+    });
+
+    safeAddListener(messenger.accounts && messenger.accounts.onDeleted, async (accountId) => {
+        await enqueueEvent("accounts.onDeleted", { accountId });
+    });
+
+    safeAddListener(messenger.identities && messenger.identities.onCreated, async (identity) => {
+        await enqueueEvent("identities.onCreated", { identityId: identity && identity.id, email: identity && identity.email });
+    });
+
+    safeAddListener(messenger.identities && messenger.identities.onUpdated, async (identity) => {
+        await enqueueEvent("identities.onUpdated", { identityId: identity && identity.id, email: identity && identity.email });
+    });
+
+    safeAddListener(messenger.identities && messenger.identities.onDeleted, async (identityId) => {
+        await enqueueEvent("identities.onDeleted", { identityId });
+    });
+
+    safeAddListener(messenger.compose && messenger.compose.onBeforeSend, async (tab, details) => {
+        await enqueueEvent("compose.onBeforeSend", {
+            tabId: tab && tab.id,
+            details
+        });
+    });
+
+    safeAddListener(messenger.compose && messenger.compose.onAfterSend, async (tab, sendInfo) => {
+        await enqueueEvent("compose.onAfterSend", {
+            tabId: tab && tab.id,
+            sendInfo
+        });
+    });
+
+    safeAddListener(messenger.compose && messenger.compose.onAfterSave, async (tab, saveInfo) => {
+        await enqueueEvent("compose.onAfterSave", {
+            tabId: tab && tab.id,
+            saveInfo
+        });
+    });
+
+    safeAddListener(messenger.addressBooks && messenger.addressBooks.onCreated, async (addressBook) => {
+        await enqueueEvent("addressBooks.onCreated", { addressBook });
+    });
+
+    safeAddListener(messenger.addressBooks && messenger.addressBooks.onUpdated, async (addressBook) => {
+        await enqueueEvent("addressBooks.onUpdated", { addressBook });
+    });
+
+    safeAddListener(messenger.addressBooks && messenger.addressBooks.onDeleted, async (addressBookId) => {
+        await enqueueEvent("addressBooks.onDeleted", { addressBookId });
+    });
+
+    safeAddListener(messenger.addressBooks && messenger.addressBooks.contacts && messenger.addressBooks.contacts.onCreated, async (contact, parentId) => {
+        await enqueueEvent("addressBooks.contacts.onCreated", { contact, parentId });
+    });
+
+    safeAddListener(messenger.addressBooks && messenger.addressBooks.contacts && messenger.addressBooks.contacts.onUpdated, async (contact, parentId) => {
+        await enqueueEvent("addressBooks.contacts.onUpdated", { contact, parentId });
+    });
+
+    safeAddListener(messenger.addressBooks && messenger.addressBooks.contacts && messenger.addressBooks.contacts.onDeleted, async (contactId, parentId) => {
+        await enqueueEvent("addressBooks.contacts.onDeleted", { contactId, parentId });
+    });
+
+    // periodic flush to drain queue even without new events
+    setInterval(flushEventQueue, EVENT_FLUSH_INTERVAL_MS);
+    flushEventQueue();
+}
 
 /**
  * Find a message by its Message-ID header
@@ -383,6 +777,206 @@ async function listFolders() {
     }
 }
 
+function isAllowedRpcMethodPath(methodPath) {
+    if (typeof methodPath !== "string" || !methodPath.trim()) return false;
+
+    if (methodPath.startsWith("cortex.")) return true;
+
+    const allowedPrefixes = [
+        "messages.",
+        "compose.",
+        "folders.",
+        "accounts.",
+        "identities.",
+        "addressBooks."
+    ];
+
+    if (!allowedPrefixes.some(prefix => methodPath.startsWith(prefix))) return false;
+
+    // Disallow tampering with events/listeners over RPC
+    const parts = methodPath.split(".");
+    if (parts.some(p => p === "addListener" || p === "removeListener" || p === "hasListener")) return false;
+    if (parts.some(p => /^on[A-Z]/.test(p))) return false;
+
+    return true;
+}
+
+function getRpcFunctionByPath(methodPath) {
+    const parts = methodPath.split(".");
+    let obj = messenger;
+
+    for (const part of parts) {
+        if (!obj || typeof obj !== "object") return null;
+        obj = obj[part];
+    }
+
+    return (typeof obj === "function") ? obj : null;
+}
+
+function sanitizeRpcResult(value) {
+    if (value === undefined) return null;
+    if (value === null) return null;
+
+    if (value instanceof Date) return value.toISOString();
+
+    if (Array.isArray(value)) {
+        return value.map(sanitizeRpcResult);
+    }
+
+    if (typeof value === "object") {
+        // Attempt a JSON-safe deep sanitize without blowing up on special objects.
+        try {
+            return JSON.parse(JSON.stringify(value));
+        } catch (error) {
+            return String(value);
+        }
+    }
+
+    return value;
+}
+
+async function cortexResolveMessageIds(headerMessageIds) {
+    const resolved = [];
+    const failed = [];
+
+    for (const headerMessageId of headerMessageIds) {
+        const message = await findMessageByHeaderId(headerMessageId);
+        if (message) {
+            resolved.push({ headerMessageId, messageId: message.id });
+        } else {
+            failed.push({ headerMessageId, error: "Message not found" });
+        }
+    }
+
+    return { resolved, failed };
+}
+
+async function cortexRpc(methodPath, args) {
+    switch (methodPath) {
+        case "cortex.findMessageByHeaderId": {
+            const message = await findMessageByHeaderId(args[0]);
+            return minifyMessageHeader(message);
+        }
+        case "cortex.resolveMessageIds": {
+            return await cortexResolveMessageIds(args[0] || []);
+        }
+        case "cortex.messages.updateByHeaderId": {
+            const headerMessageId = args[0];
+            const props = args[1] || {};
+            const message = await findMessageByHeaderId(headerMessageId);
+            if (!message) throw new Error("Message not found");
+            await messenger.messages.update(message.id, props);
+            return { headerMessageId, messageId: message.id, updated: true };
+        }
+        case "cortex.messages.archiveByHeaderId": {
+            const headerMessageIds = args[0] || [];
+            const { resolved, failed } = await cortexResolveMessageIds(headerMessageIds);
+            const messageIds = resolved.map(x => x.messageId);
+            if (messageIds.length) {
+                await messenger.messages.archive(messageIds);
+            }
+            return { archived: resolved, failed };
+        }
+        case "cortex.messages.deleteByHeaderId": {
+            const headerMessageIds = args[0] || [];
+            const skipTrash = args[1] === true;
+            const { resolved, failed } = await cortexResolveMessageIds(headerMessageIds);
+            const messageIds = resolved.map(x => x.messageId);
+            if (messageIds.length) {
+                await messenger.messages.delete(messageIds, skipTrash);
+            }
+            return { deleted: resolved, failed, skipTrash };
+        }
+        case "cortex.messages.moveByHeaderId": {
+            const headerMessageIds = args[0] || [];
+            const folderPath = args[1];
+            const { resolved, failed } = await cortexResolveMessageIds(headerMessageIds);
+            if (!folderPath) throw new Error("Missing folderPath");
+
+            const accounts = await messenger.accounts.list();
+            let targetFolder = null;
+            for (const account of accounts) {
+                targetFolder = await findFolder(account.id, folderPath);
+                if (targetFolder) break;
+            }
+            if (!targetFolder) throw new Error(`Folder not found: ${folderPath}`);
+
+            const messageIds = resolved.map(x => x.messageId);
+            if (messageIds.length) {
+                await messenger.messages.move(messageIds, targetFolder);
+            }
+            return { moved: resolved, failed, folder: minifyFolder(targetFolder) };
+        }
+        case "cortex.messages.copyByHeaderId": {
+            const headerMessageIds = args[0] || [];
+            const folderPath = args[1];
+            const { resolved, failed } = await cortexResolveMessageIds(headerMessageIds);
+            if (!folderPath) throw new Error("Missing folderPath");
+
+            const accounts = await messenger.accounts.list();
+            let targetFolder = null;
+            for (const account of accounts) {
+                targetFolder = await findFolder(account.id, folderPath);
+                if (targetFolder) break;
+            }
+            if (!targetFolder) throw new Error(`Folder not found: ${folderPath}`);
+
+            const messageIds = resolved.map(x => x.messageId);
+            if (messageIds.length) {
+                await messenger.messages.copy(messageIds, targetFolder);
+            }
+            return { copied: resolved, failed, folder: minifyFolder(targetFolder) };
+        }
+        case "cortex.messages.getFullByHeaderId": {
+            const headerMessageId = args[0];
+            const message = await findMessageByHeaderId(headerMessageId);
+            if (!message) throw new Error("Message not found");
+            const full = await messenger.messages.getFull(message.id);
+            return { headerMessageId, messageId: message.id, full };
+        }
+        case "cortex.messages.getRawByHeaderId": {
+            const headerMessageId = args[0];
+            const message = await findMessageByHeaderId(headerMessageId);
+            if (!message) throw new Error("Message not found");
+            const raw = await messenger.messages.getRaw(message.id);
+            return { headerMessageId, messageId: message.id, raw };
+        }
+        default:
+            throw new Error(`Unknown cortex RPC method: ${methodPath}`);
+    }
+}
+
+async function executeRpcCommand(cmd) {
+    const method = cmd.method;
+    const args = Array.isArray(cmd.args) ? cmd.args : [];
+
+    if (!isAllowedRpcMethodPath(method)) {
+        return { success: false, action: "rpc", method, error: `Method not allowed: ${method}` };
+    }
+
+    try {
+        let result;
+        if (method.startsWith("cortex.")) {
+            result = await cortexRpc(method, args);
+        } else {
+            const fn = getRpcFunctionByPath(method);
+            if (!fn) {
+                return { success: false, action: "rpc", method, error: `Unknown method: ${method}` };
+            }
+            result = await fn(...args);
+        }
+
+        return {
+            success: true,
+            action: "rpc",
+            method,
+            result: sanitizeRpcResult(result)
+        };
+    } catch (error) {
+        return { success: false, action: "rpc", method, error: error.message || String(error) };
+    }
+}
+
 /**
  * Process a single command
  */
@@ -416,6 +1010,9 @@ async function processCommand(cmd) {
         // Discovery
         case "list_folders":
             return await listFolders();
+        // Generic RPC executor (allowlisted)
+        case "rpc":
+            return await executeRpcCommand(cmd);
         default:
             return { success: false, error: "Unknown action: " + cmd.action };
     }
@@ -429,7 +1026,8 @@ async function pollForCommands() {
     isPolling = true;
 
     try {
-        const response = await fetch(`${CORTEX_SERVER}/tbird-sync/pending`, {
+        const baseUrl = await getCortexServerUrl();
+        const response = await fetch(`${baseUrl}/tbird-sync/pending`, {
             method: "GET",
             headers: { "Accept": "application/json" }
         });
@@ -454,7 +1052,8 @@ async function pollForCommands() {
             results.push(result);
         }
 
-        await fetch(`${CORTEX_SERVER}/tbird-sync/complete`, {
+        const baseUrl2 = await getCortexServerUrl();
+        await fetch(`${baseUrl2}/tbird-sync/complete`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ results })
@@ -467,7 +1066,10 @@ async function pollForCommands() {
     }
 }
 
+initEventPush().catch(() => {});
 setInterval(pollForCommands, POLL_INTERVAL_MS);
 pollForCommands();
 
-console.log("Cortex1 Thunderbird Sync v1.4.0 loaded - polling every " + (POLL_INTERVAL_MS/1000) + "s");
+console.log(
+    `Cortex1 Thunderbird Sync v${getExtensionVersion()} loaded - polling every ${(POLL_INTERVAL_MS/1000)}s`
+);
