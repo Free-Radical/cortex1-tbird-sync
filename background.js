@@ -777,6 +777,22 @@ async function listFolders() {
     }
 }
 
+async function handleToolbarClick() {
+    await enqueueEvent("cortex.browser_action.clicked", { ok: true });
+
+    try {
+        await flushEventQueue();
+    } catch (error) {
+        // best-effort
+    }
+
+    try {
+        await pollForCommands();
+    } catch (error) {
+        // best-effort
+    }
+}
+
 function isAllowedRpcMethodPath(methodPath) {
     if (typeof methodPath !== "string" || !methodPath.trim()) return false;
 
@@ -1067,6 +1083,9 @@ async function pollForCommands() {
 }
 
 initEventPush().catch(() => {});
+safeAddListener(messenger.browserAction && messenger.browserAction.onClicked, () => {
+    handleToolbarClick();
+});
 setInterval(pollForCommands, POLL_INTERVAL_MS);
 pollForCommands();
 

@@ -1,7 +1,7 @@
 {
   "manifest_version": 2,
   "name": "Cortex1 Thunderbird Sync",
-  "version": "1.5.1",
+  "version": "1.6.0",
   "description": "Syncs message status with Thunderbird via polling + optional HTTP push",
   "author": "Saqib A Khan",
   "homepage_url": "https://github.com/Free-Radical/cortex1-tbird-sync",
@@ -26,8 +26,20 @@
     "16": "icons/icon-16.png",
     "32": "icons/icon-32.png",
     "48": "icons/icon-48.png",
+    "64": "icons/icon-64.png",
     "96": "icons/icon-96.png",
     "128": "icons/icon-128.png"
+  },
+  "browser_action": {
+    "default_title": "Cortex1 Sync",
+    "default_icon": {
+      "16": "icons/icon-16.png",
+      "32": "icons/icon-32.png",
+      "48": "icons/icon-48.png",
+      "64": "icons/icon-64.png",
+      "96": "icons/icon-96.png",
+      "128": "icons/icon-128.png"
+    }
   },
   "background": {
     "scripts": ["background.js"]
