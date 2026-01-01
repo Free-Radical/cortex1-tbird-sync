@@ -10,7 +10,7 @@ REM Remove old xpi
 if exist cortex1-tbird-sync.xpi del cortex1-tbird-sync.xpi
 
 REM Create xpi (zip with different extension)
-powershell -Command "Compress-Archive -Path manifest.json, background.js -DestinationPath cortex1-tbird-sync.zip -Force"
+powershell -Command "Compress-Archive -Path manifest.json, background.js, icons -DestinationPath cortex1-tbird-sync.zip -Force"
 ren cortex1-tbird-sync.zip cortex1-tbird-sync.xpi
 
 echo.
