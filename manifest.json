@@ -1,7 +1,7 @@
 {
   "manifest_version": 2,
   "name": "Cortex1 Thunderbird Sync",
-  "version": "1.6.0",
+  "version": "1.6.1",
   "description": "Syncs message status with Thunderbird via polling + optional HTTP push",
   "author": "Saqib A Khan",
   "homepage_url": "https://github.com/Free-Radical/cortex1-tbird-sync",
@@ -20,7 +20,9 @@
     "accountsRead",
     "compose",
     "addressBooks",
-    "storage"
+    "storage",
+    "http://localhost:*/*",
+    "http://127.0.0.1:*/*"
   ],
   "icons": {
     "16": "icons/icon-16.png",
