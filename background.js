@@ -993,6 +993,276 @@ async function executeRpcCommand(cmd) {
     }
 }
 
+// ============================================================================
+// Backfill Replied/Forwarded - Helper Functions
+// ============================================================================
+
+const GET_FULL_CALLS_PER_SECOND = 10;
+const PROGRESS_EVERY_N_MESSAGES = 50;
+
+function sleep(ms) {
+    return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function createRateLimiter(callsPerSecond) {
+    const minIntervalMs = Math.max(1, Math.floor(1000 / callsPerSecond));
+    let nextAllowedAt = 0;
+    return async function rateLimitWait() {
+        const now = Date.now();
+        if (now < nextAllowedAt) {
+            await sleep(nextAllowedAt - now);
+        }
+        nextAllowedAt = Math.max(nextAllowedAt, now) + minIntervalMs;
+    };
+}
+
+const rateLimitGetFull = createRateLimiter(GET_FULL_CALLS_PER_SECOND);
+
+function normalizeMessageId(raw) {
+    if (!raw) return "";
+    let value = String(raw).trim();
+    if (value.startsWith("<") && value.endsWith(">")) {
+        value = value.slice(1, -1).trim();
+    }
+    return value;
+}
+
+function extractMessageIds(headerValue) {
+    if (!headerValue) return [];
+    const value = String(headerValue);
+    const angleBracketMatches = value.match(/<[^>]+>/g);
+
+    let candidates = [];
+    if (angleBracketMatches && angleBracketMatches.length) {
+        candidates = angleBracketMatches.map((s) => s.trim());
+    } else {
+        candidates = value.split(/\s+/g).map((s) => s.trim());
+    }
+
+    const out = [];
+    const seen = new Set();
+    for (const candidate of candidates) {
+        const normalized = normalizeMessageId(candidate);
+        if (!normalized) continue;
+        if (seen.has(normalized)) continue;
+        seen.add(normalized);
+        out.push(normalized);
+    }
+    return out;
+}
+
+function getHeaderValues(getFullResult, headerName) {
+    const headers = getFullResult && getFullResult.headers ? getFullResult.headers : null;
+    if (!headers) return [];
+    const want = String(headerName || "").toLowerCase();
+    for (const [name, values] of Object.entries(headers)) {
+        if (String(name).toLowerCase() !== want) continue;
+        if (Array.isArray(values)) return values.map((v) => String(v));
+        return [String(values)];
+    }
+    return [];
+}
+
+function getFirstHeader(getFullResult, headerName) {
+    const values = getHeaderValues(getFullResult, headerName);
+    return values.length ? values[0] : "";
+}
+
+function isForwardSubject(subject) {
+    if (!subject) return false;
+    return /^\s*(fw|fwd)\s*:/i.test(String(subject));
+}
+
+function getMessageDateMs(message) {
+    const dateValue = message ? message.date : null;
+    if (!dateValue) return null;
+    if (typeof dateValue === "number") return dateValue;
+    if (dateValue instanceof Date) return dateValue.getTime();
+    const parsed = Date.parse(String(dateValue));
+    return Number.isFinite(parsed) ? parsed : null;
+}
+
+function toFiniteNumber(value, fallback) {
+    const n = typeof value === "number" ? value : Number(String(value));
+    return Number.isFinite(n) ? n : fallback;
+}
+
+async function listFolderMessagesFirstPage(folder, pageSize) {
+    try {
+        return await messenger.messages.list(folder, { limit: pageSize });
+    } catch {
+        return await messenger.messages.list(folder);
+    }
+}
+
+async function* iterateFolderMessages(folder, pageSize = 100) {
+    let page = await listFolderMessagesFirstPage(folder, pageSize);
+    while (page) {
+        const messages = Array.isArray(page.messages) ? page.messages : [];
+        for (const msg of messages) yield msg;
+        if (!page.id) break;
+        page = await messenger.messages.continueList(page.id);
+    }
+}
+
+async function postProgressUpdate(commandId, processed, total, status) {
+    if (!commandId) return;
+    try {
+        const baseUrl = await getCortexServerUrl();
+        await fetch(`${baseUrl}/tbird-sync/progress`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+                command_id: commandId,
+                processed,
+                total,
+                status,
+            }),
+        });
+    } catch {
+        // Best-effort: don't fail the command if progress reporting fails.
+    }
+}
+
+async function addTagPreservingExisting(tbMessageId, tag) {
+    const msg = await messenger.messages.get(tbMessageId);
+    const currentTags = Array.isArray(msg.tags) ? msg.tags : [];
+    if (currentTags.includes(tag)) return false;
+    const newTags = [...currentTags, tag];
+    await messenger.messages.update(tbMessageId, { tags: newTags });
+    return true;
+}
+
+async function handleBackfillRepliedForwarded(cmd) {
+    const daysBack = toFiniteNumber(cmd.days_back, 30);
+    const limit = toFiniteNumber(cmd.limit, 500);
+    const accountId = cmd.account_id != null ? String(cmd.account_id) : null;
+    const commandId = cmd.id || cmd.command_id || null;
+
+    const cutoffMs = Date.now() - Math.max(0, daysBack) * 24 * 60 * 60 * 1000;
+
+    const result = {
+        success: true,
+        processed: 0,
+        replied_tagged: 0,
+        forwarded_tagged: 0,
+        not_found: 0,
+        errors: [],
+        replied_tagged_ids: [],
+        forwarded_tagged_ids: [],
+    };
+
+    const resolvedCache = new Map();
+    const repliedTaggedMessageIds = new Set();
+    const forwardedTaggedMessageIds = new Set();
+
+    const sentFolders = await messenger.folders.query({ type: "sent" });
+    const targetFolders = Array.isArray(sentFolders)
+        ? sentFolders.filter((f) => !accountId || String(f.accountId) === accountId)
+        : [];
+
+    await postProgressUpdate(commandId, 0, limit, "in_progress");
+
+    outer: for (const folder of targetFolders) {
+        let lastDateMs = Infinity;
+        let seemsNewestFirst = true;
+
+        for await (const sentMsg of iterateFolderMessages(folder, 100)) {
+            if (result.processed >= limit) break outer;
+
+            const dateMs = getMessageDateMs(sentMsg);
+            if (dateMs != null) {
+                if (dateMs > lastDateMs + 1000) seemsNewestFirst = false;
+                lastDateMs = dateMs;
+                if (seemsNewestFirst && dateMs < cutoffMs) break;
+                if (dateMs < cutoffMs) continue;
+            }
+
+            let full;
+            try {
+                await rateLimitGetFull();
+                full = await messenger.messages.getFull(sentMsg.id);
+            } catch (e) {
+                result.errors.push(`getFull failed for sentMsg.id=${sentMsg.id}: ${String(e)}`);
+                continue;
+            }
+
+            result.processed += 1;
+
+            const subject = sentMsg.subject || getFirstHeader(full, "subject") || "";
+            const inReplyToRaw = getFirstHeader(full, "in-reply-to");
+            const referencesRaw = getFirstHeader(full, "references");
+
+            const inReplyToIds = extractMessageIds(inReplyToRaw);
+            const referenceIds = extractMessageIds(referencesRaw);
+
+            const replyTargetHeaderId = inReplyToIds.length ? inReplyToIds[0] : "";
+            const forwardTargetHeaderId =
+                isForwardSubject(subject) && referenceIds.length ? referenceIds[referenceIds.length - 1] : "";
+
+            const maybeTagOriginal = async (targetHeaderId, tag, taggedSet, counterKey, idsArrayKey) => {
+                if (!targetHeaderId) return;
+                const originalMsg = await findMessageByHeaderId(targetHeaderId, resolvedCache);
+                if (!originalMsg) {
+                    result.not_found += 1;
+                    return;
+                }
+
+                if (taggedSet.has(originalMsg.id)) return;
+                try {
+                    const added = await addTagPreservingExisting(originalMsg.id, tag);
+                    taggedSet.add(originalMsg.id);
+                    if (added) {
+                        result[counterKey] += 1;
+                        result[idsArrayKey].push(originalMsg.headerMessageId || targetHeaderId);
+                    }
+                } catch (e) {
+                    result.errors.push(`tagging failed for originalMsg.id=${originalMsg.id} tag=${tag}: ${String(e)}`);
+                }
+            };
+
+            await maybeTagOriginal(replyTargetHeaderId, "cortex/replied", repliedTaggedMessageIds, "replied_tagged", "replied_tagged_ids");
+            await maybeTagOriginal(forwardTargetHeaderId, "cortex/forwarded", forwardedTaggedMessageIds, "forwarded_tagged", "forwarded_tagged_ids");
+
+            if (result.processed % PROGRESS_EVERY_N_MESSAGES === 0) {
+                await postProgressUpdate(commandId, result.processed, limit, "in_progress");
+            }
+        }
+    }
+
+    await postProgressUpdate(commandId, result.processed, limit, "completed");
+    return result;
+}
+
+async function handleSetTags(cmd) {
+    const messageId = cmd.messageId || cmd.message_id;
+    const tags = Array.isArray(cmd.tags) ? cmd.tags : [];
+    const mode = cmd.mode || "add";
+
+    const msg = await findMessageByHeaderId(messageId);
+    if (!msg) {
+        return { success: false, error: `Message not found: ${messageId}` };
+    }
+
+    const currentTags = Array.isArray(msg.tags) ? msg.tags : [];
+    let newTags;
+
+    if (mode === "add") {
+        newTags = [...new Set([...currentTags, ...tags])];
+    } else if (mode === "remove") {
+        newTags = currentTags.filter(t => !tags.includes(t));
+    } else if (mode === "replace") {
+        newTags = tags;
+    } else {
+        return { success: false, error: `Unknown mode: ${mode}` };
+    }
+
+    await messenger.messages.update(msg.id, { tags: newTags });
+    return { success: true, action: "set_tags", messageId, tags: newTags };
+}
+
+// ============================================================================
+
 /**
  * Process a single command
  */
@@ -1029,6 +1299,12 @@ async function processCommand(cmd) {
         // Generic RPC executor (allowlisted)
         case "rpc":
             return await executeRpcCommand(cmd);
+        // Backfill replied/forwarded from Sent folder
+        case "backfill_replied_forwarded":
+            return await handleBackfillRepliedForwarded(cmd);
+        // Tag management
+        case "set_tags":
+            return await handleSetTags(cmd);
         default:
             return { success: false, error: "Unknown action: " + cmd.action };
     }
