@@ -9,6 +9,8 @@ __pycache__/
 *$py.class
 .venv/
 venv/
+.pytest_cache/
+.ruff_cache/
 
 # IDE
 .vscode/
@@ -22,6 +24,28 @@ Thumbs.db
 
 # Logs
 *.log
+logs/
 
 # Local docs snapshots (do not commit)
 .private_*.html
+
+# Local env/config (do not commit)
+.env
+.env.*
+.private/
+
+# AI tool configurations (CRITICAL - never commit)
+CLAUDE.md
+CLAUDE.*.md
+scripts/check_ai_attribution.py
+scripts/install_hooks.py
+.ai_attribution_whitelist
+.claude/
+.cursor/
+.copilot/
+.codeium/
+.tabnine/
+.continue/
+.aider*
+.ai/
+.aiconfig
