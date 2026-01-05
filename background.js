@@ -25,6 +25,70 @@ let isFlushingEvents = false;
 let cachedCortexServerUrl = null;
 let hasLoadedCortexServerUrl = false;
 
+// =============================================================================
+// Debug Logging System - Rolling buffer keeping ONLY last 5 entries total
+// =============================================================================
+
+const DEBUG_MAX_ENTRIES = 5;  // Keep only last 5 log entries total across all runs
+
+const DebugLogger = {
+    enabled: false,
+    logs: [],  // Single array of all logs (max 5)
+
+    async init() {
+        try {
+            const stored = await messenger.storage.local.get(["cortex_debug_enabled", "cortex_debug_logs"]);
+            this.enabled = stored.cortex_debug_enabled === true;
+            // Restore logs from storage (persisted across restarts)
+            this.logs = Array.isArray(stored.cortex_debug_logs) ? stored.cortex_debug_logs : [];
+        } catch (e) {
+            this.enabled = false;
+            this.logs = [];
+        }
+    },
+
+    log(category, message, data = null) {
+        const ts = new Date().toISOString().substring(11, 23);  // HH:MM:SS.mmm
+        const entry = { ts, cat: category, msg: message, data };
+
+        // Add to buffer
+        this.logs.push(entry);
+
+        // Keep only last 5 entries (flush old ones)
+        while (this.logs.length > DEBUG_MAX_ENTRIES) {
+            this.logs.shift();  // Remove oldest
+        }
+
+        // Persist to storage (survives restarts)
+        messenger.storage.local.set({ cortex_debug_logs: this.logs }).catch(() => {});
+
+        // Print to console if enabled
+        if (this.enabled) {
+            const dataStr = data ? ` | ${JSON.stringify(data)}` : "";
+            console.log(`[DEBUG:${category}] ${ts} ${message}${dataStr}`);
+        }
+    },
+
+    getLogs() {
+        return this.logs;
+    },
+
+    clear() {
+        this.logs = [];
+        messenger.storage.local.set({ cortex_debug_logs: [] }).catch(() => {});
+    },
+
+    toggle() {
+        this.enabled = !this.enabled;
+        messenger.storage.local.set({ cortex_debug_enabled: this.enabled });
+        this.log("debug", `Debug console output ${this.enabled ? "enabled" : "disabled"}`);
+        return this.enabled;
+    }
+};
+
+// Initialize debug logger
+DebugLogger.init();
+
 let eventQueue = null;
 let eventQueueMeta = null;
 let persistQueueTimer = null;
@@ -407,18 +471,27 @@ async function initEventPush() {
 /**
  * Find a message by its Message-ID header
  */
-async function findMessageByHeaderId(messageId) {
+async function findMessageByHeaderId(messageId, resolvedCache = null) {
     let cleanId = messageId.trim();
     if (cleanId.startsWith("<")) cleanId = cleanId.slice(1);
     if (cleanId.endsWith(">")) cleanId = cleanId.slice(0, -1);
+
+    // Check cache first if provided
+    if (resolvedCache && resolvedCache.has(cleanId)) {
+        return resolvedCache.get(cleanId);
+    }
 
     try {
         const result = await messenger.messages.query({
             headerMessageId: cleanId
         });
-        return result.messages && result.messages.length > 0 ? result.messages[0] : null;
+        const msg = result.messages && result.messages.length > 0 ? result.messages[0] : null;
+        if (resolvedCache && msg) {
+            resolvedCache.set(cleanId, msg);
+        }
+        return msg;
     } catch (error) {
-        console.error("Error finding message:", error);
+        DebugLogger.log("find", `Error finding message: ${error.message}`, { messageId: cleanId });
         return null;
     }
 }
@@ -998,7 +1071,8 @@ async function executeRpcCommand(cmd) {
 // ============================================================================
 
 const GET_FULL_CALLS_PER_SECOND = 10;
-const PROGRESS_EVERY_N_MESSAGES = 50;
+const PROGRESS_EVERY_N_MESSAGES = 10;
+const PROGRESS_MIN_INTERVAL_MS = 10_000;
 
 function sleep(ms) {
     return new Promise((resolve) => setTimeout(resolve, ms));
@@ -1105,22 +1179,55 @@ async function* iterateFolderMessages(folder, pageSize = 100) {
     }
 }
 
-async function postProgressUpdate(commandId, processed, total, status) {
+async function* iterateFolderMessagesSince(folder, cutoffMs, pageSize = 100) {
+    // Prefer a server-side query with a date filter when available (fast and order-independent).
+    try {
+        const queryInfo = { folder };
+        if (typeof cutoffMs === "number" && Number.isFinite(cutoffMs) && cutoffMs > 0) {
+            queryInfo.fromDate = new Date(cutoffMs);
+        }
+        let page = await messenger.messages.query(queryInfo);
+        while (page) {
+            const messages = Array.isArray(page.messages) ? page.messages : [];
+            for (const msg of messages) yield msg;
+            if (!page.id) break;
+            page = await messenger.messages.continueList(page.id);
+        }
+        return;
+    } catch {
+        // Fallback to folder listing
+    }
+
+    for await (const msg of iterateFolderMessages(folder, pageSize)) yield msg;
+}
+
+async function postProgressUpdate(commandId, processed, total, status, meta = null) {
     if (!commandId) return;
     try {
         const baseUrl = await getCortexServerUrl();
+        const payload = {
+            command_id: commandId,
+            processed,
+            total,
+            status,
+            source: "tbird-sync",
+        };
+        if (meta && typeof meta === "object") {
+            for (const [k, v] of Object.entries(meta)) {
+                if (k in payload) continue;
+                payload[k] = v;
+            }
+        }
+
         await fetch(`${baseUrl}/tbird-sync/progress`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
-                command_id: commandId,
-                processed,
-                total,
-                status,
+                ...payload,
             }),
         });
-    } catch {
-        // Best-effort: don't fail the command if progress reporting fails.
+    } catch (e) {
+        DebugLogger.log("progress", "postProgressUpdate failed", { commandId, processed, total, status, error: String(e) });
     }
 }
 
@@ -1133,105 +1240,269 @@ async function addTagPreservingExisting(tbMessageId, tag) {
     return true;
 }
 
-async function handleBackfillRepliedForwarded(cmd) {
-    const daysBack = toFiniteNumber(cmd.days_back, 30);
-    const limit = toFiniteNumber(cmd.limit, 500);
-    const accountId = cmd.account_id != null ? String(cmd.account_id) : null;
-    const commandId = cmd.id || cmd.command_id || null;
+function isLikelySentFolder(folder) {
+    if (!folder) return false;
+    if (folder.type === "sent") return true;
 
-    const cutoffMs = Date.now() - Math.max(0, daysBack) * 24 * 60 * 60 * 1000;
+    const name = String(folder.name || "").trim().toLowerCase();
+    const path = String(folder.path || "").trim().toLowerCase();
 
-    const result = {
-        success: true,
-        processed: 0,
-        replied_tagged: 0,
-        forwarded_tagged: 0,
-        not_found: 0,
-        errors: [],
-        replied_tagged_ids: [],
-        forwarded_tagged_ids: [],
-    };
+    // Common Sent folder names (English + a few typical variants).
+    const sentNames = new Set([
+        "sent",
+        "sent items",
+        "sent mail",
+        "sent messages",
+        "sent-items",
+        "sentmail",
+        "sentbox",
+    ]);
 
-    const resolvedCache = new Map();
-    const repliedTaggedMessageIds = new Set();
-    const forwardedTaggedMessageIds = new Set();
+    if (sentNames.has(name)) return true;
+    if (sentNames.has(path)) return true;
 
-    const sentFolders = await messenger.folders.query({ type: "sent" });
-    const targetFolders = Array.isArray(sentFolders)
-        ? sentFolders.filter((f) => !accountId || String(f.accountId) === accountId)
-        : [];
+    return false;
+}
 
-    await postProgressUpdate(commandId, 0, limit, "in_progress");
+function walkFolderTree(folder, out) {
+    if (typeof Cortex1SentFolderDiscovery !== "undefined" && Cortex1SentFolderDiscovery.walkFolderTree) {
+        return Cortex1SentFolderDiscovery.walkFolderTree(folder, out);
+    }
+    if (!folder) return;
+    out.push(folder);
+    const subs = Array.isArray(folder.subFolders) ? folder.subFolders : [];
+    for (const sub of subs) walkFolderTree(sub, out);
+}
 
-    outer: for (const folder of targetFolders) {
-        let lastDateMs = Infinity;
-        let seemsNewestFirst = true;
+async function getSentFolders(accountIdFilter) {
+    if (typeof Cortex1SentFolderDiscovery !== "undefined" && Cortex1SentFolderDiscovery.getSentFolders) {
+        return await Cortex1SentFolderDiscovery.getSentFolders(messenger, accountIdFilter);
+    }
+    // Defensive fallback (should not happen if manifest loads sent_folder_discovery.js)
+    const accounts = await messenger.accounts.list();
+    const out = [];
+    for (const account of accounts) {
+        if (accountIdFilter && String(account.id) !== String(accountIdFilter)) continue;
+        const folders = [];
+        for (const root of Array.isArray(account.folders) ? account.folders : []) {
+            walkFolderTree(root, folders);
+        }
+        for (const folder of folders) {
+            if (!isLikelySentFolder(folder)) continue;
+            out.push(folder);
+        }
+    }
+    return out;
+}
 
-        for await (const sentMsg of iterateFolderMessages(folder, 100)) {
-            if (result.processed >= limit) break outer;
+async function resolveAccountIdFilter(accountIdRaw) {
+    const raw = accountIdRaw != null ? String(accountIdRaw).trim() : "";
+    if (!raw) return null;
 
-            const dateMs = getMessageDateMs(sentMsg);
-            if (dateMs != null) {
-                if (dateMs > lastDateMs + 1000) seemsNewestFirst = false;
-                lastDateMs = dateMs;
-                if (seemsNewestFirst && dateMs < cutoffMs) break;
-                if (dateMs < cutoffMs) continue;
-            }
+    const accounts = await messenger.accounts.list();
+    const exact = (Array.isArray(accounts) ? accounts : []).find((a) => String(a && a.id) === raw);
+    if (exact) return String(exact.id);
 
-            let full;
-            try {
-                await rateLimitGetFull();
-                full = await messenger.messages.getFull(sentMsg.id);
-            } catch (e) {
-                result.errors.push(`getFull failed for sentMsg.id=${sentMsg.id}: ${String(e)}`);
-                continue;
-            }
+    const needle = raw.toLowerCase();
+    const candidates = [];
 
-            result.processed += 1;
+    for (const account of Array.isArray(accounts) ? accounts : []) {
+        const name = String(account && account.name ? account.name : "").trim().toLowerCase();
+        if (name && name === needle) candidates.push(account);
 
-            const subject = sentMsg.subject || getFirstHeader(full, "subject") || "";
-            const inReplyToRaw = getFirstHeader(full, "in-reply-to");
-            const referencesRaw = getFirstHeader(full, "references");
-
-            const inReplyToIds = extractMessageIds(inReplyToRaw);
-            const referenceIds = extractMessageIds(referencesRaw);
-
-            const replyTargetHeaderId = inReplyToIds.length ? inReplyToIds[0] : "";
-            const forwardTargetHeaderId =
-                isForwardSubject(subject) && referenceIds.length ? referenceIds[referenceIds.length - 1] : "";
-
-            const maybeTagOriginal = async (targetHeaderId, tag, taggedSet, counterKey, idsArrayKey) => {
-                if (!targetHeaderId) return;
-                const originalMsg = await findMessageByHeaderId(targetHeaderId, resolvedCache);
-                if (!originalMsg) {
-                    result.not_found += 1;
-                    return;
-                }
-
-                if (taggedSet.has(originalMsg.id)) return;
-                try {
-                    const added = await addTagPreservingExisting(originalMsg.id, tag);
-                    taggedSet.add(originalMsg.id);
-                    if (added) {
-                        result[counterKey] += 1;
-                        result[idsArrayKey].push(originalMsg.headerMessageId || targetHeaderId);
-                    }
-                } catch (e) {
-                    result.errors.push(`tagging failed for originalMsg.id=${originalMsg.id} tag=${tag}: ${String(e)}`);
-                }
-            };
-
-            await maybeTagOriginal(replyTargetHeaderId, "cortex/replied", repliedTaggedMessageIds, "replied_tagged", "replied_tagged_ids");
-            await maybeTagOriginal(forwardTargetHeaderId, "cortex/forwarded", forwardedTaggedMessageIds, "forwarded_tagged", "forwarded_tagged_ids");
-
-            if (result.processed % PROGRESS_EVERY_N_MESSAGES === 0) {
-                await postProgressUpdate(commandId, result.processed, limit, "in_progress");
-            }
+        const identities = Array.isArray(account && account.identities) ? account.identities : [];
+        for (const ident of identities) {
+            const email = String(ident && ident.email ? ident.email : "").trim().toLowerCase();
+            if (email && email === needle) candidates.push(account);
         }
     }
 
-    await postProgressUpdate(commandId, result.processed, limit, "completed");
-    return result;
+    const unique = new Map();
+    for (const a of candidates) {
+        if (!a || a.id == null) continue;
+        unique.set(String(a.id), a);
+    }
+    const matches = Array.from(unique.values());
+    if (matches.length === 1) return String(matches[0].id);
+
+    throw new Error(`Unknown or ambiguous account_id: ${raw}`);
+}
+
+async function handleBackfillRepliedForwarded(cmd) {
+    let step = "init";
+    let result = null;
+    let commandId = null;
+    let limit = 0;
+    let lastProgressPostAt = 0;
+
+    try {
+        const daysBack = toFiniteNumber(cmd.days_back, 30);
+        limit = toFiniteNumber(cmd.limit, 500);
+        const accountFilterRequested = cmd.account_id != null ? String(cmd.account_id) : null;
+        const accountFilterResolved = await resolveAccountIdFilter(accountFilterRequested);
+        commandId = cmd.id || cmd.command_id || null;
+
+        const cutoffMs = Date.now() - Math.max(0, daysBack) * 24 * 60 * 60 * 1000;
+
+        result = {
+            success: true,
+            processed: 0,
+            replied_tagged: 0,
+            forwarded_tagged: 0,
+            not_found: 0,
+            errors: [],
+            replied_tagged_ids: [],
+            forwarded_tagged_ids: [],
+            account_filter_requested: accountFilterRequested,
+            account_filter_resolved: accountFilterResolved,
+            folders_scanned: 0,
+            errors_count: 0,
+            completed_reason: "",
+        };
+
+        const resolvedCache = new Map();
+        const repliedTaggedMessageIds = new Set();
+        const forwardedTaggedMessageIds = new Set();
+
+        step = "resolve sent folders";
+        const targetFolders = await getSentFolders(accountFilterResolved);
+        result.sent_folders_count = Array.isArray(targetFolders) ? targetFolders.length : 0;
+        result.sent_folders = (Array.isArray(targetFolders) ? targetFolders : [])
+            .slice(0, 20)
+            .map((f) => ({
+                accountId: f && f.accountId != null ? String(f.accountId) : "",
+                name: f && f.name != null ? String(f.name) : "",
+                path: f && f.path != null ? String(f.path) : "",
+                type: f && f.type != null ? String(f.type) : "",
+            }));
+
+        step = "postProgressUpdate(start)";
+        await postProgressUpdate(commandId, 0, limit, "in_progress", {
+            step,
+            sent_folders_count: result.sent_folders_count,
+            sent_folders: result.sent_folders,
+            account_filter_requested: accountFilterRequested,
+            account_filter_resolved: accountFilterResolved,
+            folders_scanned: 0,
+            errors_count: 0,
+            not_found: 0,
+        });
+        lastProgressPostAt = Date.now();
+
+        outer: for (const folder of targetFolders) {
+            step = `iterateFolderMessagesSince(accountId=${folder.accountId} folderPath=${folder.path || ""})`;
+            result.folders_scanned += 1;
+            for await (const sentMsg of iterateFolderMessagesSince(folder, cutoffMs, 100)) {
+                if (result.processed >= limit) break outer;
+
+                const dateMs = getMessageDateMs(sentMsg);
+                if (dateMs != null && dateMs < cutoffMs) continue;
+
+                let full;
+                try {
+                    step = `messages.getFull(sentMsg.id=${sentMsg.id})`;
+                    await rateLimitGetFull();
+                    full = await messenger.messages.getFull(sentMsg.id);
+                } catch (e) {
+                    result.errors.push(`getFull failed for sentMsg.id=${sentMsg.id}: ${String(e)}`);
+                    result.errors_count = result.errors.length;
+                    continue;
+                }
+
+                result.processed += 1;
+
+                const subject = sentMsg.subject || getFirstHeader(full, "subject") || "";
+                const inReplyToRaw = getFirstHeader(full, "in-reply-to");
+                const referencesRaw = getFirstHeader(full, "references");
+
+                const inReplyToIds = extractMessageIds(inReplyToRaw);
+                const referenceIds = extractMessageIds(referencesRaw);
+
+                const replyTargetHeaderId = inReplyToIds.length ? inReplyToIds[0] : "";
+                const forwardTargetHeaderId =
+                    isForwardSubject(subject) && referenceIds.length ? referenceIds[referenceIds.length - 1] : "";
+
+                const maybeTagOriginal = async (targetHeaderId, tag, taggedSet, counterKey, idsArrayKey) => {
+                    if (!targetHeaderId) return;
+                    step = `findMessageByHeaderId(target=${targetHeaderId})`;
+                    const originalMsg = await findMessageByHeaderId(targetHeaderId, resolvedCache);
+                    if (!originalMsg) {
+                        result.not_found += 1;
+                        return;
+                    }
+
+                    if (taggedSet.has(originalMsg.id)) return;
+                    try {
+                        step = `messages.update(tag=${tag} originalMsg.id=${originalMsg.id})`;
+                        const added = await addTagPreservingExisting(originalMsg.id, tag);
+                        taggedSet.add(originalMsg.id);
+                        if (added) {
+                            result[counterKey] += 1;
+                            result[idsArrayKey].push(originalMsg.headerMessageId || targetHeaderId);
+                        }
+                    } catch (e) {
+                        result.errors.push(`tagging failed for originalMsg.id=${originalMsg.id} tag=${tag}: ${String(e)}`);
+                    }
+                };
+
+                await maybeTagOriginal(replyTargetHeaderId, "cortex/replied", repliedTaggedMessageIds, "replied_tagged", "replied_tagged_ids");
+                await maybeTagOriginal(forwardTargetHeaderId, "cortex/forwarded", forwardedTaggedMessageIds, "forwarded_tagged", "forwarded_tagged_ids");
+
+                const now = Date.now();
+                const shouldHeartbeat = (now - lastProgressPostAt) >= PROGRESS_MIN_INTERVAL_MS;
+                if (shouldHeartbeat || (result.processed % PROGRESS_EVERY_N_MESSAGES === 0)) {
+                    step = "postProgressUpdate(progress)";
+                    await postProgressUpdate(commandId, result.processed, limit, "in_progress", {
+                        step,
+                        folders_scanned: result.folders_scanned,
+                        current_folder: {
+                            accountId: folder && folder.accountId != null ? String(folder.accountId) : "",
+                            path: folder && folder.path != null ? String(folder.path) : "",
+                            name: folder && folder.name != null ? String(folder.name) : "",
+                            type: folder && folder.type != null ? String(folder.type) : "",
+                        },
+                        errors_count: result.errors.length,
+                        not_found: result.not_found,
+                    });
+                    lastProgressPostAt = now;
+                }
+            }
+        }
+
+        result.completed_reason = result.processed >= limit ? "limit_reached" : "exhausted";
+        step = "postProgressUpdate(completed)";
+        await postProgressUpdate(commandId, result.processed, result.processed, "completed", {
+            step,
+            folders_scanned: result.folders_scanned,
+            errors_count: result.errors.length,
+            not_found: result.not_found,
+            completed_reason: result.completed_reason,
+        });
+        return result;
+    } catch (e) {
+        const message = e && e.message ? e.message : String(e);
+        const processed = result && typeof result.processed === "number" ? result.processed : 0;
+        const errors = result && Array.isArray(result.errors) ? result.errors : [];
+
+        DebugLogger.log("backfill", "backfill_replied_forwarded exception", {
+            step,
+            error: String(e),
+            commandId,
+            processed,
+        });
+
+        await postProgressUpdate(commandId, processed, processed, "failed", {
+            step,
+            errors_count: errors.length,
+        });
+        return {
+            success: false,
+            error: `Exception in backfill_replied_forwarded at ${step}: ${message}`,
+            step,
+            processed,
+            errors,
+        };
+    }
 }
 
 async function handleSetTags(cmd) {
@@ -1267,6 +1538,10 @@ async function handleSetTags(cmd) {
  * Process a single command
  */
 async function processCommand(cmd) {
+    DebugLogger.log("cmd", "Raw command", cmd);
+    if (!cmd || !cmd.action) {
+        return { success: false, error: "Command missing action field" };
+    }
     switch (cmd.action) {
         case "mark_read":
             return await markAsRead(cmd.messageId);
@@ -1325,6 +1600,7 @@ async function pollForCommands() {
         });
 
         if (!response.ok) {
+            DebugLogger.log("poll", `Poll failed: HTTP ${response.status}`);
             return;
         }
 
@@ -1335,13 +1611,26 @@ async function pollForCommands() {
             return;
         }
 
-        console.log(`Processing ${commands.length} sync commands`);
+        DebugLogger.log("poll", `Found ${commands.length} commands`, { actions: commands.map(c => c.action) });
 
         const results = [];
         for (const cmd of commands) {
-            const result = await processCommand(cmd);
+            DebugLogger.log("cmd", `Executing: ${cmd.action}`, { id: cmd.id, messageId: cmd.messageId });
+            let result;
+            try {
+                result = await processCommand(cmd);
+            } catch (error) {
+                const message = error && error.message ? error.message : String(error);
+                DebugLogger.log("cmd", "processCommand exception", { action: cmd.action, id: cmd.id, error: String(error) });
+                result = { success: false, error: "Exception: " + message };
+            }
+            if (!result || typeof result !== "object") {
+                result = { success: false, error: "Exception: processCommand returned invalid result" };
+            }
             result.id = cmd.id;
+            result.action = cmd.action;
             results.push(result);
+            DebugLogger.log("cmd", `Result: ${result.success ? "OK" : "FAIL"}`, { action: cmd.action, error: result.error });
         }
 
         const baseUrl2 = await getCortexServerUrl();
@@ -1351,19 +1640,27 @@ async function pollForCommands() {
             body: JSON.stringify({ results })
         });
 
+        DebugLogger.log("poll", `Completed ${results.length} commands`, { successCount: results.filter(r => r.success).length });
+
     } catch (error) {
-        // Server not running - silent fail
+        DebugLogger.log("poll", `Poll error: ${error.message || error}`);
     } finally {
         isPolling = false;
     }
 }
 
 initEventPush().catch(() => {});
-safeAddListener(messenger.browserAction && messenger.browserAction.onClicked, () => {
+const toolbarClickEvent =
+    (messenger.action && messenger.action.onClicked) ||
+    (messenger.browserAction && messenger.browserAction.onClicked);
+safeAddListener(toolbarClickEvent, () => {
     handleToolbarClick();
 });
 setInterval(pollForCommands, POLL_INTERVAL_MS);
 pollForCommands();
+
+// Log startup
+DebugLogger.log("startup", `Cortex1 Thunderbird Sync v${getExtensionVersion()} loaded`, { pollIntervalMs: POLL_INTERVAL_MS });
 
 console.log(
     `Cortex1 Thunderbird Sync v${getExtensionVersion()} loaded - polling every ${(POLL_INTERVAL_MS/1000)}s`

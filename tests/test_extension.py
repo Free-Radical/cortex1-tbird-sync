@@ -221,6 +221,65 @@ def check_folders_discovery() -> CheckResult:
     return CheckResult("folders_discovery", False, "Failed to queue folders discovery", skippable=True)
 
 
+def check_backfill_reports_sent_folders() -> CheckResult:
+    """Test that backfill discovers Sent folders and reports a nonzero count.
+
+    Regression check: earlier versions depended on `folder.id` and discovered 0 sent folders.
+    """
+    queue_result = api_post("/scan-sent-folder?days_back=365&limit=10", {})
+    if queue_result is None or queue_result.get("status") != "queued":
+        return CheckResult("backfill_sent_folders", False, "Failed to queue scan-sent-folder", skippable=True)
+
+    command_id = queue_result.get("command_id")
+    if not command_id:
+        return CheckResult("backfill_sent_folders", False, "scan-sent-folder did not return command_id", skippable=True)
+
+    deadline = time.time() + 30
+    status = None
+    while time.time() < deadline:
+        status = api_get(f"/scan-sent-folder/status?command_id={command_id}")
+        if status and status.get("status") in ("completed", "failed", "timed_out"):
+            break
+        time.sleep(1)
+
+    if not status:
+        return CheckResult("backfill_sent_folders", False, "Could not get scan status", skippable=True)
+    if status.get("status") != "completed":
+        return CheckResult("backfill_sent_folders", False, f"Scan did not complete: {status}", skippable=True)
+
+    tb_status = api_get("/tbird-sync/status?limit=100")
+    if tb_status is None:
+        return CheckResult("backfill_sent_folders", False, "Could not get tbird-sync status", skippable=True)
+
+    recent = tb_status.get("recent_results", [])
+    match = next((r for r in recent if r.get("id") == command_id), None)
+    if not match:
+        return CheckResult(
+            "backfill_sent_folders",
+            False,
+            "Backfill result not found in recent_results; ensure extension is connected",
+            skippable=True,
+        )
+
+    count = match.get("sent_folders_count")
+    if not isinstance(count, int):
+        return CheckResult(
+            "backfill_sent_folders",
+            False,
+            "Backfill result missing sent_folders_count (extension too old?)",
+            skippable=True,
+        )
+
+    if count <= 0:
+        return CheckResult(
+            "backfill_sent_folders",
+            False,
+            f"Backfill discovered 0 sent folders (sent_folders={match.get('sent_folders')})",
+        )
+
+    return CheckResult("backfill_sent_folders", True, f"Backfill discovered {count} sent folders")
+
+
 def _require_check(result: CheckResult) -> None:
     if result.skippable and not result.passed:
         pytest.skip(result.message)
@@ -277,6 +336,12 @@ def test_extension_polling():
     _require_check(check_extension_polling(quick=False))
 
 
+def test_backfill_sent_folder_discovery():
+    if os.environ.get("CORTEX_TBIRD_SYNC_LIVE") != "1":
+        pytest.skip("Set CORTEX_TBIRD_SYNC_LIVE=1 to run live Thunderbird polling checks")
+    _require_check(check_backfill_reports_sent_folders())
+
+
 def run_checks(quick: bool = False) -> list[CheckResult]:
     """Run all checks (script-mode)."""
     checks = [
@@ -291,6 +356,7 @@ def run_checks(quick: bool = False) -> list[CheckResult]:
         check_create_draft_action,
         check_send_reply_safety,
         check_folders_discovery,
+        check_backfill_reports_sent_folders,
         lambda: check_extension_polling(quick),
     ]
 
