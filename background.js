@@ -153,7 +153,8 @@ function minifyMessageHeader(message) {
         read: message.read,
         flagged: message.flagged,
         junk: message.junk || false,
-        tags: message.tags
+        tags: message.tags,
+        folder: message.folder ? minifyFolder(message.folder) : null
     };
 }
 
@@ -163,7 +164,49 @@ function minifyFolder(folder) {
         accountId: folder.accountId,
         path: folder.path,
         name: folder.name,
-        type: folder.type
+        type: folder.type,
+        specialUse: Array.isArray(folder.specialUse) ? folder.specialUse : [],
+        isFavorite: folder.isFavorite || false,
+        isRoot: folder.isRoot || false
+    };
+}
+
+/**
+ * Build complete Thunderbird state object for a message.
+ * Returns all available properties from TB API.
+ */
+function buildTbState(message) {
+    if (!message) return null;
+
+    return {
+        // Message state
+        read: message.read,
+        flagged: message.flagged,
+        junk: message.junk || false,
+        tags: Array.isArray(message.tags) ? message.tags : [],
+
+        // Folder info
+        folder: message.folder ? {
+            accountId: message.folder.accountId || null,
+            path: message.folder.path || "",
+            name: message.folder.name || "",
+            type: message.folder.type || null,
+            specialUse: Array.isArray(message.folder.specialUse)
+                ? message.folder.specialUse
+                : [],
+            isFavorite: message.folder.isFavorite || false,
+            isRoot: message.folder.isRoot || false,
+        } : null,
+
+        // Message metadata
+        date: message.date,
+        subject: message.subject,
+        author: message.author,
+        headerMessageId: message.headerMessageId,
+        size: message.size || null,
+
+        // Timestamp when state was read
+        stateReadAt: new Date().toISOString()
     };
 }
 
@@ -506,7 +549,9 @@ async function markAsRead(messageId) {
     }
     try {
         await messenger.messages.update(message.id, { read: true });
-        return { success: true, messageId, action: "mark_read" };
+        // Re-fetch message to get updated state
+        const updatedMessage = await messenger.messages.get(message.id);
+        return { success: true, messageId, action: "mark_read", tb_state: buildTbState(updatedMessage) };
     } catch (error) {
         return { success: false, error: error.message, messageId };
     }
@@ -522,7 +567,9 @@ async function markAsUnread(messageId) {
     }
     try {
         await messenger.messages.update(message.id, { read: false });
-        return { success: true, messageId, action: "mark_unread" };
+        // Re-fetch message to get updated state
+        const updatedMessage = await messenger.messages.get(message.id);
+        return { success: true, messageId, action: "mark_unread", tb_state: buildTbState(updatedMessage) };
     } catch (error) {
         return { success: false, error: error.message, messageId };
     }
@@ -538,7 +585,9 @@ async function setFlagged(messageId, flagged) {
     }
     try {
         await messenger.messages.update(message.id, { flagged: flagged });
-        return { success: true, messageId, action: "set_flagged", flagged };
+        // Re-fetch message to get updated state
+        const updatedMessage = await messenger.messages.get(message.id);
+        return { success: true, messageId, action: "set_flagged", flagged, tb_state: buildTbState(updatedMessage) };
     } catch (error) {
         return { success: false, error: error.message, messageId };
     }
@@ -558,7 +607,9 @@ async function openMessage(messageId) {
             messageId: message.id,
             location: "window"
         });
-        return { success: true, messageId, action: "open_message" };
+        // Re-fetch message to get current state (opening may mark as read)
+        const updatedMessage = await messenger.messages.get(message.id);
+        return { success: true, messageId, action: "open_message", tb_state: buildTbState(updatedMessage) };
     } catch (error) {
         return { success: false, error: error.message, messageId };
     }
@@ -570,21 +621,41 @@ async function openMessage(messageId) {
 async function archiveMessages(messageIds) {
     const results = { success: [], failed: [] };
     const tbIds = [];
+    const tbIdToHeaderId = new Map();
 
     // Resolve all message IDs to Thunderbird internal IDs
     for (const msgId of messageIds) {
         const message = await findMessageByHeaderId(msgId);
         if (message) {
             tbIds.push(message.id);
+            tbIdToHeaderId.set(message.id, msgId);
             results.success.push(msgId);
         } else {
             results.failed.push({ messageId: msgId, error: "Message not found" });
         }
     }
 
+    const tbStates = [];
+
     if (tbIds.length > 0) {
         try {
             await messenger.messages.archive(tbIds);
+            // Fetch updated state for each archived message
+            for (const tbId of tbIds) {
+                try {
+                    const updatedMessage = await messenger.messages.get(tbId);
+                    tbStates.push({
+                        messageId: tbIdToHeaderId.get(tbId),
+                        tb_state: buildTbState(updatedMessage)
+                    });
+                } catch (e) {
+                    // Message may have been moved, still include with null state
+                    tbStates.push({
+                        messageId: tbIdToHeaderId.get(tbId),
+                        tb_state: null
+                    });
+                }
+            }
         } catch (error) {
             // Move successful ones to failed
             results.failed.push(...results.success.map(id => ({ messageId: id, error: error.message })));
@@ -597,7 +668,8 @@ async function archiveMessages(messageIds) {
         action: "archive",
         archived: results.success,
         failed: results.failed,
-        count: results.success.length
+        count: results.success.length,
+        tb_states: tbStates
     };
 }
 
@@ -607,17 +679,21 @@ async function archiveMessages(messageIds) {
 async function moveMessages(messageIds, folderPath) {
     const results = { success: [], failed: [] };
     const tbIds = [];
+    const tbIdToHeaderId = new Map();
 
     // Resolve all message IDs to Thunderbird internal IDs
     for (const msgId of messageIds) {
         const message = await findMessageByHeaderId(msgId);
         if (message) {
             tbIds.push(message.id);
+            tbIdToHeaderId.set(message.id, msgId);
             results.success.push(msgId);
         } else {
             results.failed.push({ messageId: msgId, error: "Message not found" });
         }
     }
+
+    const tbStates = [];
 
     if (tbIds.length > 0) {
         try {
@@ -640,6 +716,22 @@ async function moveMessages(messageIds, folderPath) {
             }
 
             await messenger.messages.move(tbIds, targetFolder);
+            // Fetch updated state for each moved message
+            for (const tbId of tbIds) {
+                try {
+                    const updatedMessage = await messenger.messages.get(tbId);
+                    tbStates.push({
+                        messageId: tbIdToHeaderId.get(tbId),
+                        tb_state: buildTbState(updatedMessage)
+                    });
+                } catch (e) {
+                    // Message ID may have changed after move, include with null state
+                    tbStates.push({
+                        messageId: tbIdToHeaderId.get(tbId),
+                        tb_state: null
+                    });
+                }
+            }
         } catch (error) {
             results.failed.push(...results.success.map(id => ({ messageId: id, error: error.message })));
             results.success = [];
@@ -652,7 +744,8 @@ async function moveMessages(messageIds, folderPath) {
         folder: folderPath,
         moved: results.success,
         failed: results.failed,
-        count: results.success.length
+        count: results.success.length,
+        tb_states: tbStates
     };
 }
 
@@ -785,7 +878,8 @@ async function getMessageStatus(messageId) {
             author: message.author
             // Note: 'forwarded' and 'replied' are NOT exposed by Thunderbird WebExtension API
             // These can only be read from X-Mozilla-Status headers which may be stale
-        }
+        },
+        tb_state: buildTbState(message)
     };
 }
 
@@ -802,7 +896,8 @@ async function bulkGetStatus(messageIds) {
                 messageId: msgId,
                 read: message.read,
                 flagged: message.flagged,
-                junk: message.junk || false
+                junk: message.junk || false,
+                tb_state: buildTbState(message)
             });
         } else {
             results.failed.push({ messageId: msgId, error: "Message not found" });
@@ -1580,6 +1675,37 @@ async function processCommand(cmd) {
         // Tag management
         case "set_tags":
             return await handleSetTags(cmd);
+        // Bulk sync state for multiple messages
+        case "sync_state":
+        case "bulk_sync_state": {
+            const messageIds = cmd.messageIds || [];
+            const states = [];
+            const failed = [];
+
+            for (const msgId of messageIds) {
+                try {
+                    const message = await findMessageByHeaderId(msgId);
+                    if (message) {
+                        states.push({
+                            messageId: msgId,
+                            tb_state: buildTbState(message)
+                        });
+                    } else {
+                        failed.push({ messageId: msgId, error: "Not found" });
+                    }
+                } catch (e) {
+                    failed.push({ messageId: msgId, error: e.message });
+                }
+            }
+
+            return {
+                success: failed.length === 0,
+                action: "sync_state",
+                states: states,
+                failed: failed,
+                count: states.length
+            };
+        }
         default:
             return { success: false, error: "Unknown action: " + cmd.action };
     }

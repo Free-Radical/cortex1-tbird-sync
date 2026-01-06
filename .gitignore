@@ -49,3 +49,10 @@ scripts/install_hooks.py
 .aider*
 .ai/
 .aiconfig
+
+# Node.js
+node_modules/
+coverage/
+
+# Misc
+nul
