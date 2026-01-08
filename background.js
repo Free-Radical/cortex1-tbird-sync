@@ -1730,6 +1730,26 @@ let lastPollTime = Date.now();
 let pollLoopTimer = null;
 let pollLoopInFlight = false;
 
+// Command execution is decoupled from polling so long-running commands cannot
+// block the next /pending poll. This keeps `last_poll_ago` low even during
+// multi-minute backfills.
+const COMMAND_TIMEOUT_MS = 30000; // Default per-command timeout
+const LONG_COMMAND_TIMEOUT_MS = 10 * 60 * 1000; // Allow slow commands more time
+const LONG_RUNNING_ACTIONS = new Set(["backfill_replied_forwarded"]);
+
+const knownCommandIds = new Set(); // prevents re-enqueueing the same server command
+const fastCommandQueue = [];
+const slowCommandQueue = [];
+
+let fastWorkerRunning = false;
+let slowWorkerRunning = false;
+
+const inFlightCommands = new Map(); // id -> { action, startedAt, lane }
+
+const completionQueue = []; // results pending POST to /tbird-sync/complete
+let completionFlushInFlight = false;
+let completionFlushTimer = null;
+
 /**
  * Fetch wrapper with a hard timeout using AbortController.
  * Prevents hung network calls from keeping isPolling=true forever.
@@ -1741,6 +1761,209 @@ async function fetchWithTimeout(url, options, timeoutMs = 10000) {
         return await fetch(url, { ...options, signal: controller.signal });
     } finally {
         clearTimeout(timeout);
+    }
+}
+
+function getCommandTimeoutMs(cmd) {
+    const action = cmd && cmd.action ? String(cmd.action) : "";
+    return LONG_RUNNING_ACTIONS.has(action) ? LONG_COMMAND_TIMEOUT_MS : COMMAND_TIMEOUT_MS;
+}
+
+function safeCommandId(cmd) {
+    if (!cmd) return null;
+    if (cmd.id != null) return String(cmd.id);
+    if (cmd.command_id != null) return String(cmd.command_id);
+    return null;
+}
+
+function enqueueCommands(commands) {
+    if (!Array.isArray(commands) || commands.length === 0) return 0;
+
+    let enqueued = 0;
+    for (const cmd of commands) {
+        const id = safeCommandId(cmd);
+        if (!id) {
+            DebugLogger.log("poll", "Skipping command without id", { action: cmd && cmd.action ? cmd.action : null });
+            continue;
+        }
+
+        if (knownCommandIds.has(id)) continue;
+        knownCommandIds.add(id);
+
+        const action = cmd && cmd.action ? String(cmd.action) : "";
+        const lane = LONG_RUNNING_ACTIONS.has(action) ? "slow" : "fast";
+        if (lane === "slow") {
+            slowCommandQueue.push(cmd);
+        } else {
+            fastCommandQueue.push(cmd);
+        }
+        enqueued += 1;
+    }
+
+    if (enqueued > 0) {
+        startWorkers();
+    }
+
+    return enqueued;
+}
+
+function ensureValidCommandResult(cmd, result, errorMessage) {
+    let out = result;
+    if (!out || typeof out !== "object") {
+        out = { success: false, error: errorMessage || "Exception: invalid result" };
+    }
+    out.id = cmd && cmd.id != null ? cmd.id : (cmd && cmd.command_id != null ? cmd.command_id : out.id);
+    out.action = cmd && cmd.action != null ? cmd.action : out.action;
+    return out;
+}
+
+async function executeCommandWithTimeout(cmd) {
+    const id = safeCommandId(cmd);
+    const action = cmd && cmd.action ? String(cmd.action) : "";
+    const timeoutMs = getCommandTimeoutMs(cmd);
+    const startedAt = Date.now();
+
+    let lane = LONG_RUNNING_ACTIONS.has(action) ? "slow" : "fast";
+    if (id) {
+        inFlightCommands.set(id, { action, startedAt, lane });
+    }
+
+    DebugLogger.log("cmd", `Executing: ${action}`, { id, messageId: cmd && cmd.messageId != null ? cmd.messageId : cmd && cmd.message_id });
+
+    let timedOut = false;
+    let timerId = null;
+
+    const underlying = (async () => {
+        try {
+            return await processCommand(cmd);
+        } catch (error) {
+            const message = error && error.message ? error.message : String(error);
+            DebugLogger.log("cmd", "processCommand exception", { action, id, error: String(error) });
+            return { success: false, error: "Exception: " + message };
+        }
+    })();
+
+    const timeoutPromise = new Promise((_, reject) => {
+        timerId = setTimeout(() => {
+            timedOut = true;
+            reject(new Error(`Command timeout after ${timeoutMs}ms`));
+        }, timeoutMs);
+    });
+
+    let result;
+    try {
+        result = await Promise.race([underlying, timeoutPromise]);
+    } catch (error) {
+        if (timedOut) {
+            result = { success: false, error: `Timeout after ${timeoutMs}ms` };
+            // Prevent unhandled rejections from the underlying promise after timeout.
+            underlying
+                .then(() => {
+                    DebugLogger.log("cmd", "Late command completion ignored", { action, id, timeoutMs });
+                })
+                .catch((e) => {
+                    DebugLogger.log("cmd", "Late command failure ignored", { action, id, timeoutMs, error: String(e) });
+                });
+        } else {
+            const message = error && error.message ? error.message : String(error);
+            result = { success: false, error: "Exception: " + message };
+        }
+    } finally {
+        if (timerId) clearTimeout(timerId);
+        if (id) inFlightCommands.delete(id);
+    }
+
+    const durationMs = Date.now() - startedAt;
+    const finalResult = ensureValidCommandResult(cmd, result, "Exception: processCommand returned invalid result");
+
+    DebugLogger.log("cmd", `Result: ${finalResult.success ? "OK" : "FAIL"}`, {
+        action,
+        id,
+        timedOut,
+        durationMs,
+        error: finalResult.error
+    });
+
+    return finalResult;
+}
+
+function startWorkers() {
+    startFastWorker();
+    startSlowWorker();
+    scheduleCompletionFlush(0);
+}
+
+function startFastWorker() {
+    if (fastWorkerRunning) return;
+    if (fastCommandQueue.length === 0) return;
+    fastWorkerRunning = true;
+    runWorkerLoop("fast").catch(() => {}).finally(() => { fastWorkerRunning = false; startFastWorker(); });
+}
+
+function startSlowWorker() {
+    if (slowWorkerRunning) return;
+    if (slowCommandQueue.length === 0) return;
+    slowWorkerRunning = true;
+    runWorkerLoop("slow").catch(() => {}).finally(() => { slowWorkerRunning = false; startSlowWorker(); });
+}
+
+async function runWorkerLoop(lane) {
+    const queue = lane === "slow" ? slowCommandQueue : fastCommandQueue;
+    while (queue.length > 0) {
+        const cmd = queue.shift();
+        if (!cmd) continue;
+        const res = await executeCommandWithTimeout(cmd);
+        completionQueue.push(res);
+        scheduleCompletionFlush(0);
+    }
+}
+
+function scheduleCompletionFlush(delayMs) {
+    if (completionFlushTimer) return;
+    completionFlushTimer = setTimeout(() => {
+        completionFlushTimer = null;
+        flushCompletions().catch(() => {});
+    }, Math.max(0, delayMs || 0));
+}
+
+async function flushCompletions() {
+    if (completionFlushInFlight) return;
+    if (completionQueue.length === 0) return;
+    completionFlushInFlight = true;
+
+    try {
+        const baseUrl = await getCortexServerUrl();
+
+        // Post in small batches so a single large payload can't wedge completion.
+        while (completionQueue.length > 0) {
+            const batch = completionQueue.slice(0, 25);
+            const response = await fetchWithTimeout(`${baseUrl}/tbird-sync/complete`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ results: batch })
+            });
+
+            if (!response.ok) {
+                DebugLogger.log("complete", `Complete failed: HTTP ${response.status}`, { queued: completionQueue.length });
+                markPollFailure(`complete HTTP ${response.status}`);
+                scheduleCompletionFlush(Math.min(currentPollInterval, 60000));
+                return;
+            }
+
+            completionQueue.splice(0, batch.length);
+            for (const r of batch) {
+                const id = r && r.id != null ? String(r.id) : null;
+                if (id) knownCommandIds.delete(id);
+            }
+
+            DebugLogger.log("complete", `Posted ${batch.length} result(s)`, { remaining: completionQueue.length });
+        }
+    } catch (error) {
+        DebugLogger.log("complete", `Complete post error: ${error.message || error}`, { queued: completionQueue.length });
+        markPollFailure(`complete post: ${error.message || error}`);
+        scheduleCompletionFlush(Math.min(currentPollInterval, 60000));
+    } finally {
+        completionFlushInFlight = false;
     }
 }
 
@@ -1792,54 +2015,29 @@ async function pollForCommands() {
 
         const data = await response.json();
         const commands = data.commands || [];
-        const results = [];
 
-        if (commands.length === 0) {
-            // -----------------------------------------------------------------------------
-            // Heartbeat: even an "empty" poll is a successful poll cycle.
-            // -----------------------------------------------------------------------------
-            markPollSuccess();
-            DebugLogger.log("heartbeat", "Poll alive", { commandsProcessed: 0, connectionState, pollIntervalMs: currentPollInterval });
-            return;
+        // -----------------------------------------------------------------------------
+        // Non-blocking: enqueue commands and return immediately. Command execution and
+        // /complete posting happen in workers, keeping polling responsive.
+        // -----------------------------------------------------------------------------
+        const enqueued = enqueueCommands(commands);
+        if (commands.length > 0) {
+            DebugLogger.log("poll", `Found ${commands.length} commands`, { actions: commands.map(c => c.action), enqueued });
         }
 
-        DebugLogger.log("poll", `Found ${commands.length} commands`, { actions: commands.map(c => c.action) });
-
-        for (const cmd of commands) {
-            DebugLogger.log("cmd", `Executing: ${cmd.action}`, { id: cmd.id, messageId: cmd.messageId });
-            let result;
-            try {
-                result = await processCommand(cmd);
-            } catch (error) {
-                const message = error && error.message ? error.message : String(error);
-                DebugLogger.log("cmd", "processCommand exception", { action: cmd.action, id: cmd.id, error: String(error) });
-                result = { success: false, error: "Exception: " + message };
-            }
-            if (!result || typeof result !== "object") {
-                result = { success: false, error: "Exception: processCommand returned invalid result" };
-            }
-            result.id = cmd.id;
-            result.action = cmd.action;
-            results.push(result);
-            DebugLogger.log("cmd", `Result: ${result.success ? "OK" : "FAIL"}`, { action: cmd.action, error: result.error });
-        }
-
-        const baseUrl2 = await getCortexServerUrl();
-        const completeResponse = await fetchWithTimeout(`${baseUrl2}/tbird-sync/complete`, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ results })
-        });
-
-        if (!completeResponse.ok) {
-            DebugLogger.log("poll", `Complete failed: HTTP ${completeResponse.status}`);
-            markPollFailure(`complete HTTP ${completeResponse.status}`);
-            return;
-        }
-
-        DebugLogger.log("poll", `Completed ${results.length} commands`, { successCount: results.filter(r => r.success).length });
         markPollSuccess();
-        DebugLogger.log("heartbeat", "Poll alive", { commandsProcessed: results.length, connectionState, pollIntervalMs: currentPollInterval });
+        DebugLogger.log("heartbeat", "Poll alive", {
+            // Kept for compatibility with earlier heartbeat format.
+            commandsProcessed: 0,
+            commandsReceived: commands.length,
+            commandsEnqueued: enqueued,
+            fastQueue: fastCommandQueue.length,
+            slowQueue: slowCommandQueue.length,
+            inFlight: inFlightCommands.size,
+            pendingCompletions: completionQueue.length,
+            connectionState,
+            pollIntervalMs: currentPollInterval
+        });
 
     } catch (error) {
         const msg = (error && error.name === "AbortError")
