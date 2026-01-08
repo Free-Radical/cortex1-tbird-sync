@@ -1265,10 +1265,20 @@ async function listFolderMessagesFirstPage(folder, pageSize) {
 }
 
 async function* iterateFolderMessages(folder, pageSize = 100) {
+    // When iterating lots of messages, yield to the event loop periodically so
+    // timers (polling/watchdog) and UI remain responsive. This mirrors patterns
+    // used by large-export extensions like ImportExportTools NG.
+    let yielded = 0;
     let page = await listFolderMessagesFirstPage(folder, pageSize);
     while (page) {
         const messages = Array.isArray(page.messages) ? page.messages : [];
-        for (const msg of messages) yield msg;
+        for (const msg of messages) {
+            yield msg;
+            yielded += 1;
+            if (yielded % 50 === 0) {
+                await new Promise(resolve => setTimeout(resolve, 0));
+            }
+        }
         if (!page.id) break;
         page = await messenger.messages.continueList(page.id);
     }
@@ -1282,9 +1292,16 @@ async function* iterateFolderMessagesSince(folder, cutoffMs, pageSize = 100) {
             queryInfo.fromDate = new Date(cutoffMs);
         }
         let page = await messenger.messages.query(queryInfo);
+        let yielded = 0;
         while (page) {
             const messages = Array.isArray(page.messages) ? page.messages : [];
-            for (const msg of messages) yield msg;
+            for (const msg of messages) {
+                yield msg;
+                yielded += 1;
+                if (yielded % 50 === 0) {
+                    await new Promise(resolve => setTimeout(resolve, 0));
+                }
+            }
             if (!page.id) break;
             page = await messenger.messages.continueList(page.id);
         }
@@ -1314,7 +1331,8 @@ async function postProgressUpdate(commandId, processed, total, status, meta = nu
             }
         }
 
-        await fetch(`${baseUrl}/tbird-sync/progress`, {
+        // Never allow a progress update to hang a long-running command.
+        await fetchWithTimeout(`${baseUrl}/tbird-sync/progress`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
