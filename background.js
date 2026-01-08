@@ -54,6 +54,9 @@ const DebugLogger = {
         // Add to buffer
         this.logs.push(entry);
 
+        // TODO(logging): Add an "Export Diagnostics" action to save logs + recent failures to a local
+        // JSON/JSONL file so debugging works even when cortex_server isn't installed/running.
+
         // Keep only last 5 entries (flush old ones)
         while (this.logs.length > DEBUG_MAX_ENTRIES) {
             this.logs.shift();  // Remove oldest
