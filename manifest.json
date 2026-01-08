@@ -21,8 +21,8 @@
     "compose",
     "addressBooks",
     "storage",
-    "http://localhost:*/*",
-    "http://127.0.0.1:*/*"
+    "*://localhost/*",
+    "*://127.0.0.1/*"
   ],
   "icons": {
     "16": "icons/icon-16.png",
