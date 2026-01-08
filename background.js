@@ -29,7 +29,7 @@ let hasLoadedCortexServerUrl = false;
 // Debug Logging System - Rolling buffer keeping ONLY last 5 entries total
 // =============================================================================
 
-const DEBUG_MAX_ENTRIES = 5;  // Keep only last 5 log entries total across all runs
+const DEBUG_MAX_ENTRIES = 100;  // Keep only last 100 log entries total across all runs
 
 const DebugLogger = {
     enabled: false,
@@ -1711,6 +1711,59 @@ async function processCommand(cmd) {
     }
 }
 
+// =============================================================================
+// Bulletproof polling loop (timeouts, watchdog, backoff, and heartbeat logging)
+// =============================================================================
+
+// Connection state tracking (best-effort UX/diagnostics)
+let connectionState = "DISCONNECTED"; // CONNECTED, DISCONNECTED, RECONNECTING
+let consecutiveFailures = 0;
+const MAX_FAILURES_BEFORE_BACKOFF = 3;
+
+// Poll interval with exponential backoff on repeated failures
+let currentPollInterval = POLL_INTERVAL_MS;  // Starts at 3000ms
+
+// Watchdog: updated at the START of each poll cycle
+let lastPollTime = Date.now();
+
+// Track the loop so we can avoid overlaps and ensure it never dies silently
+let pollLoopTimer = null;
+let pollLoopInFlight = false;
+
+/**
+ * Fetch wrapper with a hard timeout using AbortController.
+ * Prevents hung network calls from keeping isPolling=true forever.
+ */
+async function fetchWithTimeout(url, options, timeoutMs = 10000) {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+        return await fetch(url, { ...options, signal: controller.signal });
+    } finally {
+        clearTimeout(timeout);
+    }
+}
+
+function markPollSuccess() {
+    consecutiveFailures = 0;
+    currentPollInterval = POLL_INTERVAL_MS;
+    connectionState = "CONNECTED";
+}
+
+function markPollFailure(reason) {
+    consecutiveFailures += 1;
+    if (consecutiveFailures === 1) {
+        connectionState = "DISCONNECTED";
+    }
+
+    // Exponential backoff after N consecutive failures (max 60s)
+    if (consecutiveFailures >= MAX_FAILURES_BEFORE_BACKOFF) {
+        currentPollInterval = Math.min(currentPollInterval * 2, 60000);
+        connectionState = "RECONNECTING";
+        DebugLogger.log("backoff", `Backing off to ${currentPollInterval}ms`, { consecutiveFailures, reason });
+    }
+}
+
 /**
  * Poll cortex_server for pending commands
  */
@@ -1719,27 +1772,39 @@ async function pollForCommands() {
     isPolling = true;
 
     try {
+        // -----------------------------------------------------------------------------
+        // Polling safety: mark activity at the start of each poll cycle so the watchdog
+        // can detect stalls (e.g. hung network requests) and force recovery.
+        // -----------------------------------------------------------------------------
+        lastPollTime = Date.now();
+
         const baseUrl = await getCortexServerUrl();
-        const response = await fetch(`${baseUrl}/tbird-sync/pending`, {
+        const response = await fetchWithTimeout(`${baseUrl}/tbird-sync/pending`, {
             method: "GET",
             headers: { "Accept": "application/json" }
         });
 
         if (!response.ok) {
             DebugLogger.log("poll", `Poll failed: HTTP ${response.status}`);
+            markPollFailure(`HTTP ${response.status}`);
             return;
         }
 
         const data = await response.json();
         const commands = data.commands || [];
+        const results = [];
 
         if (commands.length === 0) {
+            // -----------------------------------------------------------------------------
+            // Heartbeat: even an "empty" poll is a successful poll cycle.
+            // -----------------------------------------------------------------------------
+            markPollSuccess();
+            DebugLogger.log("heartbeat", "Poll alive", { commandsProcessed: 0, connectionState, pollIntervalMs: currentPollInterval });
             return;
         }
 
         DebugLogger.log("poll", `Found ${commands.length} commands`, { actions: commands.map(c => c.action) });
 
-        const results = [];
         for (const cmd of commands) {
             DebugLogger.log("cmd", `Executing: ${cmd.action}`, { id: cmd.id, messageId: cmd.messageId });
             let result;
@@ -1760,17 +1825,34 @@ async function pollForCommands() {
         }
 
         const baseUrl2 = await getCortexServerUrl();
-        await fetch(`${baseUrl2}/tbird-sync/complete`, {
+        const completeResponse = await fetchWithTimeout(`${baseUrl2}/tbird-sync/complete`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ results })
         });
 
+        if (!completeResponse.ok) {
+            DebugLogger.log("poll", `Complete failed: HTTP ${completeResponse.status}`);
+            markPollFailure(`complete HTTP ${completeResponse.status}`);
+            return;
+        }
+
         DebugLogger.log("poll", `Completed ${results.length} commands`, { successCount: results.filter(r => r.success).length });
+        markPollSuccess();
+        DebugLogger.log("heartbeat", "Poll alive", { commandsProcessed: results.length, connectionState, pollIntervalMs: currentPollInterval });
 
     } catch (error) {
-        DebugLogger.log("poll", `Poll error: ${error.message || error}`);
+        const msg = (error && error.name === "AbortError")
+            ? "Poll error: fetch timeout (10s)"
+            : `Poll error: ${error.message || error}`;
+        DebugLogger.log("poll", msg);
+        markPollFailure(msg);
     } finally {
+        // -----------------------------------------------------------------------------
+        // Polling safety: update again on exit so the watchdog measures "time since the
+        // last poll finished", avoiding false positives when backoff gets large.
+        // -----------------------------------------------------------------------------
+        lastPollTime = Date.now();
         isPolling = false;
     }
 }
@@ -1782,8 +1864,45 @@ const toolbarClickEvent =
 safeAddListener(toolbarClickEvent, () => {
     handleToolbarClick();
 });
-setInterval(pollForCommands, POLL_INTERVAL_MS);
-pollForCommands();
+
+// Watchdog timer: detects dead polling and forcibly resets the lock.
+setInterval(() => {
+    const silentMs = Date.now() - lastPollTime;
+    if (silentMs > 60000) {  // No poll started for 60s
+        DebugLogger.log("watchdog", `Polling stalled for ${silentMs}ms, forcing isPolling=false`, {
+            silentMs,
+            isPolling,
+            connectionState,
+            pollIntervalMs: currentPollInterval
+        });
+        isPolling = false;  // Force reset of the polling lock
+
+        // Ensure the scheduling loop is still alive (non-fatal safety net)
+        if (!pollLoopInFlight && !pollLoopTimer) {
+            pollLoopTimer = setTimeout(pollLoop, 0);
+        }
+    }
+}, 30000);
+
+// Dynamic polling loop so backoff can change the delay between polls.
+async function pollLoop() {
+    if (pollLoopInFlight) return; // Prevent overlaps if called from multiple places
+    pollLoopInFlight = true;
+    pollLoopTimer = null;
+
+    try {
+        await pollForCommands();
+    } catch (error) {
+        // pollForCommands is best-effort and already logs, but never let the loop die.
+        DebugLogger.log("poll", `pollLoop error: ${error.message || error}`);
+        markPollFailure(error && error.message ? error.message : String(error));
+    } finally {
+        pollLoopInFlight = false;
+        pollLoopTimer = setTimeout(pollLoop, currentPollInterval);
+    }
+}
+
+pollLoop();  // Start the loop
 
 // Log startup
 DebugLogger.log("startup", `Cortex1 Thunderbird Sync v${getExtensionVersion()} loaded`, { pollIntervalMs: POLL_INTERVAL_MS });
