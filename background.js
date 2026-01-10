@@ -2123,6 +2123,58 @@ async function pollLoop() {
 
 pollLoop();  // Start the loop
 
+// =============================================================================
+// Push-based new email notification for pending_ingest queue
+// Posts to /tbird-sync/new-email so cortex can ingest emails regardless of read status
+// =============================================================================
+
+const NEW_EMAIL_DEBOUNCE_MS = 100;
+let newEmailBatch = [];
+let newEmailTimer = null;
+
+async function flushNewEmailBatch() {
+    const batch = newEmailBatch.splice(0);
+    if (!batch.length) return;
+    const baseUrl = await getCortexServerUrl();
+    await Promise.all(batch.map(async (payload) => {
+        try {
+            const response = await fetchWithTimeout(`${baseUrl}/tbird-sync/new-email`, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify(payload)
+            });
+            if (!response.ok) throw new Error(`HTTP ${response.status}`);
+            DebugLogger.log("new-email", "Posted new email", { message_id: payload.message_id });
+        } catch (error) {
+            DebugLogger.log("new-email", "Post failed", { message_id: payload.message_id, error: String(error) });
+        }
+    }));
+}
+
+function queueNewEmail(payload) {
+    newEmailBatch.push(payload);
+    if (newEmailTimer) return;
+    newEmailTimer = setTimeout(() => {
+        newEmailTimer = null;
+        flushNewEmailBatch().catch((error) => DebugLogger.log("new-email", "Flush error", { error: String(error) }));
+    }, NEW_EMAIL_DEBOUNCE_MS);
+}
+
+// Register listener for push-based ingest (separate from event push)
+safeAddListener(messenger.messages && messenger.messages.onNewMailReceived, (folder, messageList) => {
+    const messages = messageList && messageList.messages ? messageList.messages : [];
+    for (const msg of messages) {
+        queueNewEmail({
+            message_id: msg && msg.headerMessageId,
+            account_id: folder && folder.accountId,
+            folder_path: folder && folder.path,
+            subject: msg && msg.subject,
+            from: msg && msg.author,
+            date: msg && msg.date ? new Date(msg.date).toISOString() : null
+        });
+    }
+});
+
 // Log startup
 DebugLogger.log("startup", `Cortex1 Thunderbird Sync v${getExtensionVersion()} loaded`, { pollIntervalMs: POLL_INTERVAL_MS });
 
