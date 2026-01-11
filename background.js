@@ -30,6 +30,7 @@ let hasLoadedCortexServerUrl = false;
 // =============================================================================
 
 const DEBUG_MAX_ENTRIES = 100;  // Keep only last 100 log entries total across all runs
+const IS_TEST_MODE = typeof globalThis !== "undefined" && !!globalThis.CORTEX_TEST_MODE;
 
 const DebugLogger = {
     enabled: false,
@@ -234,6 +235,13 @@ async function ensureEventQueueLoaded() {
 }
 
 function schedulePersistQueue() {
+    if (IS_TEST_MODE) {
+        messenger.storage.local.set({
+            [EVENT_QUEUE_KEY]: eventQueue || [],
+            [EVENT_QUEUE_META_KEY]: eventQueueMeta || {}
+        }).catch(() => {});
+        return;
+    }
     if (persistQueueTimer) return;
     persistQueueTimer = setTimeout(async () => {
         persistQueueTimer = null;
@@ -249,6 +257,10 @@ function schedulePersistQueue() {
 }
 
 function scheduleFlushQueue() {
+    if (IS_TEST_MODE) {
+        flushEventQueue();
+        return;
+    }
     if (flushQueueTimer) return;
     flushQueueTimer = setTimeout(() => {
         flushQueueTimer = null;
@@ -311,17 +323,17 @@ async function postEventBatch(events) {
 
 async function flushEventQueue() {
     if (isFlushingEvents) return;
-    if (!(await isEventPushEnabled())) return;
-
-    await ensureEventQueueLoaded();
-
-    if (!eventQueue.length) return;
-
-    const now = Date.now();
-    if (eventQueueMeta.nextAttemptAtMs && now < eventQueueMeta.nextAttemptAtMs) return;
-
     isFlushingEvents = true;
     try {
+        if (!(await isEventPushEnabled())) return;
+
+        await ensureEventQueueLoaded();
+
+        if (!eventQueue.length) return;
+
+        const now = Date.now();
+        if (eventQueueMeta.nextAttemptAtMs && now < eventQueueMeta.nextAttemptAtMs) return;
+
         const batch = eventQueue.slice(0, EVENT_BATCH_SIZE);
         await postEventBatch(batch);
 
@@ -1822,7 +1834,9 @@ function enqueueCommands(commands) {
     }
 
     if (enqueued > 0) {
-        startWorkers();
+        if (!IS_TEST_MODE) {
+            startWorkers();
+        }
     }
 
     return enqueued;
@@ -1935,11 +1949,19 @@ async function runWorkerLoop(lane) {
         if (!cmd) continue;
         const res = await executeCommandWithTimeout(cmd);
         completionQueue.push(res);
-        scheduleCompletionFlush(0);
+        if (IS_TEST_MODE) {
+            await flushCompletions();
+        } else {
+            scheduleCompletionFlush(0);
+        }
     }
 }
 
 function scheduleCompletionFlush(delayMs) {
+    if (IS_TEST_MODE) {
+        flushCompletions().catch(() => {});
+        return;
+    }
     if (completionFlushTimer) return;
     completionFlushTimer = setTimeout(() => {
         completionFlushTimer = null;
@@ -2042,6 +2064,10 @@ async function pollForCommands() {
         // /complete posting happen in workers, keeping polling responsive.
         // -----------------------------------------------------------------------------
         const enqueued = enqueueCommands(commands);
+        if (IS_TEST_MODE && enqueued > 0) {
+            await runWorkerLoop("fast");
+            await runWorkerLoop("slow");
+        }
         if (commands.length > 0) {
             DebugLogger.log("poll", `Found ${commands.length} commands`, { actions: commands.map(c => c.action), enqueued });
         }
@@ -2076,7 +2102,9 @@ async function pollForCommands() {
     }
 }
 
-initEventPush().catch(() => {});
+if (!IS_TEST_MODE) {
+    initEventPush().catch(() => {});
+}
 const toolbarClickEvent =
     (messenger.action && messenger.action.onClicked) ||
     (messenger.browserAction && messenger.browserAction.onClicked);
@@ -2121,7 +2149,9 @@ async function pollLoop() {
     }
 }
 
-pollLoop();  // Start the loop
+if (!IS_TEST_MODE) {
+    pollLoop();  // Start the loop
+}
 
 // =============================================================================
 // Push-based new email notification for pending_ingest queue
@@ -2131,6 +2161,35 @@ pollLoop();  // Start the loop
 const NEW_EMAIL_DEBOUNCE_MS = 100;
 let newEmailBatch = [];
 let newEmailTimer = null;
+const NEW_EMAIL_POLL_MS = 30000;
+let newEmailPollTimer = null;
+let newEmailPollInFlight = false;
+let newEmailLastCheckMs = 0;
+const newEmailSeenIds = new Map();
+
+async function resolveNewEmailMessageId(msg) {
+    if (msg && msg.headerMessageId) {
+        return String(msg.headerMessageId).trim();
+    }
+    const msgId = msg && msg.id;
+    if (!msgId || !messenger.messages || !messenger.messages.getFull) {
+        return "";
+    }
+    try {
+        const full = await messenger.messages.getFull(msgId);
+        const headers = full && full.headers ? full.headers : {};
+        const rawId = headers["message-id"] || headers["message_id"];
+        if (Array.isArray(rawId)) {
+            return String(rawId[0] || "").trim();
+        }
+        if (rawId) {
+            return String(rawId).trim();
+        }
+    } catch (error) {
+        DebugLogger.log("new-email", "Header lookup failed", { error: String(error) });
+    }
+    return "";
+}
 
 async function flushNewEmailBatch() {
     const batch = newEmailBatch.splice(0);
@@ -2151,8 +2210,12 @@ async function flushNewEmailBatch() {
     }));
 }
 
-function queueNewEmail(payload) {
+async function queueNewEmail(payload) {
     newEmailBatch.push(payload);
+    if (IS_TEST_MODE) {
+        await flushNewEmailBatch().catch((error) => DebugLogger.log("new-email", "Flush error", { error: String(error) }));
+        return;
+    }
     if (newEmailTimer) return;
     newEmailTimer = setTimeout(() => {
         newEmailTimer = null;
@@ -2160,12 +2223,86 @@ function queueNewEmail(payload) {
     }, NEW_EMAIL_DEBOUNCE_MS);
 }
 
+function pruneNewEmailSeen(limit = 2000, maxAgeMs = 6 * 60 * 60 * 1000) {
+    const now = Date.now();
+    for (const [key, ts] of newEmailSeenIds.entries()) {
+        if (now - ts > maxAgeMs) {
+            newEmailSeenIds.delete(key);
+        }
+    }
+    if (newEmailSeenIds.size <= limit) return;
+    const entries = Array.from(newEmailSeenIds.entries()).sort((a, b) => a[1] - b[1]);
+    const toRemove = entries.length - limit;
+    for (let i = 0; i < toRemove; i += 1) {
+        newEmailSeenIds.delete(entries[i][0]);
+    }
+}
+
+async function getInboxFolders() {
+    if (!messenger.accounts || !messenger.accounts.list) return [];
+    const accounts = await messenger.accounts.list();
+    const inboxFolders = [];
+    for (const account of accounts || []) {
+        const folders = [];
+        for (const root of Array.isArray(account.folders) ? account.folders : []) {
+            walkFolderTree(root, folders);
+        }
+        for (const folder of folders) {
+            if (!folder) continue;
+            const name = String(folder.name || "").toLowerCase();
+            const path = String(folder.path || "").toLowerCase();
+            if (folder.type === "inbox" || name === "inbox" || path === "/inbox") {
+                inboxFolders.push(folder);
+                break;
+            }
+        }
+    }
+    return inboxFolders;
+}
+
+async function pollForNewEmails() {
+    if (newEmailPollInFlight) return;
+    newEmailPollInFlight = true;
+    try {
+        const now = Date.now();
+        const cutoffMs = newEmailLastCheckMs || (now - (5 * 60 * 1000));
+        const folders = await getInboxFolders();
+        for (const folder of folders) {
+            for await (const msg of iterateFolderMessagesSince(folder, cutoffMs, 100)) {
+                const messageId = await resolveNewEmailMessageId(msg);
+                if (!messageId) continue;
+                if (newEmailSeenIds.has(messageId)) continue;
+                newEmailSeenIds.set(messageId, now);
+                await queueNewEmail({
+                    message_id: messageId,
+                    account_id: folder && folder.accountId,
+                    folder_path: folder && folder.path,
+                    subject: msg && msg.subject,
+                    from: msg && msg.author,
+                    date: msg && msg.date ? new Date(msg.date).toISOString() : null
+                });
+            }
+        }
+        pruneNewEmailSeen();
+        newEmailLastCheckMs = now;
+    } catch (error) {
+        DebugLogger.log("new-email", "Poll failed", { error: String(error) });
+    } finally {
+        newEmailPollInFlight = false;
+    }
+}
+
 // Register listener for push-based ingest (separate from event push)
-safeAddListener(messenger.messages && messenger.messages.onNewMailReceived, (folder, messageList) => {
+safeAddListener(messenger.messages && messenger.messages.onNewMailReceived, async (folder, messageList) => {
     const messages = messageList && messageList.messages ? messageList.messages : [];
     for (const msg of messages) {
-        queueNewEmail({
-            message_id: msg && msg.headerMessageId,
+        const messageId = await resolveNewEmailMessageId(msg);
+        if (!messageId) {
+            DebugLogger.log("new-email", "Missing message-id", { msg_id: msg && msg.id });
+            continue;
+        }
+        await queueNewEmail({
+            message_id: messageId,
             account_id: folder && folder.accountId,
             folder_path: folder && folder.path,
             subject: msg && msg.subject,
@@ -2174,6 +2311,13 @@ safeAddListener(messenger.messages && messenger.messages.onNewMailReceived, (fol
         });
     }
 });
+
+if (!IS_TEST_MODE) {
+    pollForNewEmails().catch((error) => DebugLogger.log("new-email", "Poll failed", { error: String(error) }));
+    newEmailPollTimer = setInterval(() => {
+        pollForNewEmails().catch((error) => DebugLogger.log("new-email", "Poll failed", { error: String(error) }));
+    }, NEW_EMAIL_POLL_MS);
+}
 
 // Log startup
 DebugLogger.log("startup", `Cortex1 Thunderbird Sync v${getExtensionVersion()} loaded`, { pollIntervalMs: POLL_INTERVAL_MS });

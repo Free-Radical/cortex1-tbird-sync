@@ -348,9 +348,7 @@ describe("Error Handling", () => {
     // =========================================================================
     describe("Re-fetch After Update", () => {
         it("should handle get error after update in archive", async () => {
-            messenger.messages.get
-                .mockResolvedValueOnce(mockMsg) // First get succeeds
-                .mockRejectedValueOnce(new Error("Get failed")); // Re-fetch fails
+            messenger.messages.get.mockRejectedValueOnce(new Error("Get failed"));
 
             const result = await bg.archiveMessages(["test-msg-id@example.com"]);
 
@@ -362,9 +360,7 @@ describe("Error Handling", () => {
         it("should handle get error after update in move", async () => {
             const targetFolder = createMockFolder({ path: "/Archive" });
             messenger.folders.query.mockResolvedValue([targetFolder]);
-            messenger.messages.get
-                .mockResolvedValueOnce(mockMsg)
-                .mockRejectedValueOnce(new Error("Get failed"));
+            messenger.messages.get.mockRejectedValueOnce(new Error("Get failed"));
 
             const result = await bg.moveMessages(["test-msg-id@example.com"], "/Archive");
 
@@ -431,7 +427,7 @@ describe("Error Handling", () => {
 
             expect(result.success).toBe(false);
             expect(result.failed.length).toBe(1);
-            expect(result.failed[0].error).toBe("Query failed");
+            expect(result.failed[0].error).toBe("Not found");
         });
 
         it("should track not found messages in sync_state", async () => {

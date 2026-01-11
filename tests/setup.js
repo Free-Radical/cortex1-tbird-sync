@@ -100,6 +100,9 @@ const createMockMessenger = () => {
             query: jest.fn(),
             getFull: jest.fn(),
             getRaw: jest.fn(),
+            onNewMailReceived: {
+                addListener: jest.fn()
+            },
             tags: {
                 list: jest.fn(),
                 create: jest.fn(),
@@ -166,6 +169,9 @@ beforeEach(() => {
     // Reset all mocks
     jest.clearAllMocks();
     jest.useFakeTimers();
+
+    // Signal background.js to skip auto-poll/event init during tests
+    global.CORTEX_TEST_MODE = true;
 
     // Create fresh messenger mock
     mockMessenger = createMockMessenger();
@@ -244,6 +250,7 @@ module.exports = {
             Set: global.Set,
             AbortController: global.AbortController,
             AbortSignal: global.AbortSignal,
+            CORTEX_TEST_MODE: global.CORTEX_TEST_MODE,
             // Pre-create __exports__ so it's accessible after vm.runInContext
             __exports__: {}
         };
@@ -295,6 +302,7 @@ module.exports = {
                 flushEventQueue,
                 postEventBatch,
                 ensureEventQueueLoaded,
+                pollForNewEmails,
 
                 // Debug logger
                 DebugLogger,

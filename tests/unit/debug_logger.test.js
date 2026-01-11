@@ -170,56 +170,70 @@ describe("Debug Logger", () => {
     });
 
     // =========================================================================
-    // Rolling Buffer (Max 5 Entries)
+    // Rolling Buffer (Max Entries)
     // =========================================================================
     describe("Rolling Buffer", () => {
-        it("should keep only last 5 entries", () => {
+        it("should keep only last max entries", () => {
             bg.DebugLogger.logs = [];
 
-            // Add 7 entries
-            for (let i = 1; i <= 7; i++) {
+            const maxEntries = bg.DEBUG_MAX_ENTRIES;
+            const overflow = maxEntries + 2;
+
+            // Add more than max entries
+            for (let i = 1; i <= overflow; i++) {
                 bg.DebugLogger.log("test", `message ${i}`);
             }
 
-            expect(bg.DebugLogger.logs.length).toBe(5);
+            expect(bg.DebugLogger.logs.length).toBe(maxEntries);
         });
 
         it("should drop oldest entries first", () => {
             bg.DebugLogger.logs = [];
 
-            // Add 7 entries
-            for (let i = 1; i <= 7; i++) {
+            const maxEntries = bg.DEBUG_MAX_ENTRIES;
+            const overflow = maxEntries + 2;
+
+            // Add more than max entries
+            for (let i = 1; i <= overflow; i++) {
                 bg.DebugLogger.log("test", `message ${i}`);
             }
 
-            // Should have messages 3-7
-            expect(bg.DebugLogger.logs[0].msg).toBe("message 3");
-            expect(bg.DebugLogger.logs[4].msg).toBe("message 7");
+            const expectedStart = overflow - maxEntries + 1;
+            const expectedEnd = overflow;
+
+            expect(bg.DebugLogger.logs[0].msg).toBe(`message ${expectedStart}`);
+            expect(bg.DebugLogger.logs[maxEntries - 1].msg).toBe(`message ${expectedEnd}`);
         });
 
-        it("should maintain max 5 entries even with multiple rapid logs", () => {
+        it("should maintain max entries even with multiple rapid logs", () => {
             bg.DebugLogger.logs = [];
 
-            // Add 100 entries
-            for (let i = 1; i <= 100; i++) {
+            const maxEntries = bg.DEBUG_MAX_ENTRIES;
+            const overflow = maxEntries * 2;
+
+            // Add many entries
+            for (let i = 1; i <= overflow; i++) {
                 bg.DebugLogger.log("test", `message ${i}`);
             }
 
-            expect(bg.DebugLogger.logs.length).toBe(5);
-            expect(bg.DebugLogger.logs[4].msg).toBe("message 100");
+            expect(bg.DebugLogger.logs.length).toBe(maxEntries);
+            expect(bg.DebugLogger.logs[maxEntries - 1].msg).toBe(`message ${overflow}`);
         });
 
         it("should persist truncated logs to storage", () => {
             bg.DebugLogger.logs = [];
 
-            // Add 7 entries
-            for (let i = 1; i <= 7; i++) {
+            const maxEntries = bg.DEBUG_MAX_ENTRIES;
+            const overflow = maxEntries + 2;
+
+            // Add more than max entries
+            for (let i = 1; i <= overflow; i++) {
                 bg.DebugLogger.log("test", `message ${i}`);
             }
 
-            // Last storage call should have 5 entries
+            // Last storage call should have max entries
             const lastCall = messenger.storage.local.set.mock.calls.pop();
-            expect(lastCall[0].cortex_debug_logs.length).toBe(5);
+            expect(lastCall[0].cortex_debug_logs.length).toBe(maxEntries);
         });
     });
 

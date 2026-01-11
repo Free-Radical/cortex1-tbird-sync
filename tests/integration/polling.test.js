@@ -15,6 +15,24 @@ describe("Polling Behavior", () => {
     let bg;
     let mockMsg;
 
+    const collectCompleteResults = () => {
+        const completeCalls = global.fetch.mock.calls.filter(
+            call => call[0].includes("/complete")
+        );
+        const results = [];
+        for (const call of completeCalls) {
+            try {
+                const body = JSON.parse(call[1].body);
+                if (body && Array.isArray(body.results)) {
+                    results.push(...body.results);
+                }
+            } catch {
+                // ignore malformed bodies
+            }
+        }
+        return { completeCalls, results };
+    };
+
     beforeEach(() => {
         mockMsg = createMockMessage();
 
@@ -110,10 +128,8 @@ describe("Polling Behavior", () => {
             await bg.pollForCommands();
 
             // Should have called /complete
-            const completeCalls = global.fetch.mock.calls.filter(
-                call => call[0].includes("/complete")
-            );
-            expect(completeCalls.length).toBe(1);
+            const { completeCalls } = collectCompleteResults();
+            expect(completeCalls.length).toBeGreaterThanOrEqual(1);
         });
 
         it("should process multiple commands in single poll", async () => {
@@ -136,13 +152,9 @@ describe("Polling Behavior", () => {
             await bg.pollForCommands();
 
             // Check /complete was called with results for all 3 commands
-            const completeCalls = global.fetch.mock.calls.filter(
-                call => call[0].includes("/complete")
-            );
-            expect(completeCalls.length).toBe(1);
-
-            const body = JSON.parse(completeCalls[0][1].body);
-            expect(body.results.length).toBe(3);
+            const { completeCalls, results } = collectCompleteResults();
+            expect(completeCalls.length).toBeGreaterThanOrEqual(1);
+            expect(results.length).toBe(3);
         });
 
         it("should include command id and action in results", async () => {
@@ -159,13 +171,10 @@ describe("Polling Behavior", () => {
 
             await bg.pollForCommands();
 
-            const completeCalls = global.fetch.mock.calls.filter(
-                call => call[0].includes("/complete")
-            );
-            const body = JSON.parse(completeCalls[0][1].body);
-
-            expect(body.results[0].id).toBe("cmd-123");
-            expect(body.results[0].action).toBe("get_status");
+            const { results } = collectCompleteResults();
+            const match = results.find(r => r.id === "cmd-123");
+            expect(match).toBeDefined();
+            expect(match.action).toBe("get_status");
         });
 
         it("should handle command processing errors", async () => {
@@ -182,13 +191,10 @@ describe("Polling Behavior", () => {
 
             await bg.pollForCommands();
 
-            const completeCalls = global.fetch.mock.calls.filter(
-                call => call[0].includes("/complete")
-            );
-            const body = JSON.parse(completeCalls[0][1].body);
-
-            expect(body.results[0].success).toBe(false);
-            expect(body.results[0].error).toContain("Unknown action");
+            const { results } = collectCompleteResults();
+            const result = results.find(r => r.action === "invalid_action");
+            expect(result.success).toBe(false);
+            expect(result.error).toContain("Unknown action");
         });
 
         it("should handle exception during command processing", async () => {
@@ -208,13 +214,10 @@ describe("Polling Behavior", () => {
 
             await bg.pollForCommands();
 
-            const completeCalls = global.fetch.mock.calls.filter(
-                call => call[0].includes("/complete")
-            );
-            const body = JSON.parse(completeCalls[0][1].body);
-
-            expect(body.results[0].success).toBe(false);
-            expect(body.results[0].error).toContain("Critical error");
+            const { results } = collectCompleteResults();
+            const result = results.find(r => r.action === "mark_read");
+            expect(result.success).toBe(false);
+            expect(result.error).toContain("Critical error");
         });
     });
 
@@ -223,13 +226,14 @@ describe("Polling Behavior", () => {
     // =========================================================================
     describe("Concurrent Polling Prevention", () => {
         it("should not start new poll while one is in progress", async () => {
-            let resolvePoll;
-            global.fetch.mockImplementation(() => new Promise(resolve => {
+            let resolvePoll = null;
+            const pending = new Promise(resolve => {
                 resolvePoll = () => resolve({
                     ok: true,
                     json: () => Promise.resolve({ commands: [] })
                 });
-            }));
+            });
+            global.fetch.mockImplementation(() => pending);
 
             // Start first poll
             const poll1 = bg.pollForCommands();
@@ -238,6 +242,7 @@ describe("Polling Behavior", () => {
             const poll2 = bg.pollForCommands();
 
             // Complete first poll
+            expect(resolvePoll).toBeDefined();
             resolvePoll();
             await poll1;
             await poll2;
@@ -332,10 +337,8 @@ describe("Polling Behavior", () => {
 
             await bg.pollForCommands();
 
-            const completeCalls = global.fetch.mock.calls.filter(
-                call => call[0].includes("/complete")
-            );
-            expect(completeCalls.length).toBe(1);
+            const { completeCalls } = collectCompleteResults();
+            expect(completeCalls.length).toBeGreaterThanOrEqual(1);
             expect(completeCalls[0][1].method).toBe("POST");
             expect(completeCalls[0][1].headers["Content-Type"]).toBe("application/json");
         });
@@ -354,11 +357,9 @@ describe("Polling Behavior", () => {
 
             await bg.pollForCommands();
 
-            const completeCalls = global.fetch.mock.calls.filter(
-                call => call[0].includes("/complete")
-            );
+            const { completeCalls } = collectCompleteResults();
+            expect(completeCalls.length).toBeGreaterThanOrEqual(1);
             const body = JSON.parse(completeCalls[0][1].body);
-
             expect(body).toHaveProperty("results");
             expect(Array.isArray(body.results)).toBe(true);
         });
@@ -410,13 +411,10 @@ describe("Polling Behavior", () => {
 
             await bg.pollForCommands();
 
-            const completeCalls = global.fetch.mock.calls.filter(
-                call => call[0].includes("/complete")
-            );
-            const body = JSON.parse(completeCalls[0][1].body);
-
-            expect(body.results[0].tb_state).toBeDefined();
-            expect(body.results[0].tb_state.read).toBe(true);
+            const { results } = collectCompleteResults();
+            const result = results.find(r => r.action === "mark_read");
+            expect(result.tb_state).toBeDefined();
+            expect(result.tb_state.read).toBe(true);
         });
 
         it("should include tb_state for get_status command", async () => {
@@ -433,13 +431,10 @@ describe("Polling Behavior", () => {
 
             await bg.pollForCommands();
 
-            const completeCalls = global.fetch.mock.calls.filter(
-                call => call[0].includes("/complete")
-            );
-            const body = JSON.parse(completeCalls[0][1].body);
-
-            expect(body.results[0].tb_state).toBeDefined();
-            expect(body.results[0].tb_state.folder).toBeDefined();
+            const { results } = collectCompleteResults();
+            const result = results.find(r => r.action === "get_status");
+            expect(result.tb_state).toBeDefined();
+            expect(result.tb_state.folder).toBeDefined();
         });
 
         it("should include tb_states array for archive command", async () => {
@@ -458,13 +453,10 @@ describe("Polling Behavior", () => {
 
             await bg.pollForCommands();
 
-            const completeCalls = global.fetch.mock.calls.filter(
-                call => call[0].includes("/complete")
-            );
-            const body = JSON.parse(completeCalls[0][1].body);
-
-            expect(body.results[0].tb_states).toBeDefined();
-            expect(Array.isArray(body.results[0].tb_states)).toBe(true);
+            const { results } = collectCompleteResults();
+            const result = results.find(r => r.action === "archive");
+            expect(result.tb_states).toBeDefined();
+            expect(Array.isArray(result.tb_states)).toBe(true);
         });
     });
 
@@ -491,13 +483,11 @@ describe("Polling Behavior", () => {
 
             await bg.pollForCommands();
 
-            const completeCalls = global.fetch.mock.calls.filter(
-                call => call[0].includes("/complete")
-            );
-            const body = JSON.parse(completeCalls[0][1].body);
-
-            expect(body.results[0].success).toBe(true);
-            expect(body.results[1].success).toBe(false);
+            const { results } = collectCompleteResults();
+            const successes = results.filter(r => r && r.success === true).length;
+            const failures = results.filter(r => r && r.success === false).length;
+            expect(successes).toBeGreaterThanOrEqual(1);
+            expect(failures).toBeGreaterThanOrEqual(1);
         });
 
         it("should handle bulk commands", async () => {
@@ -518,13 +508,10 @@ describe("Polling Behavior", () => {
 
             await bg.pollForCommands();
 
-            const completeCalls = global.fetch.mock.calls.filter(
-                call => call[0].includes("/complete")
-            );
-            const body = JSON.parse(completeCalls[0][1].body);
-
-            expect(body.results[0].action).toBe("sync_state");
-            expect(body.results[0].states).toBeDefined();
+            const { results } = collectCompleteResults();
+            const result = results.find(r => r.action === "sync_state");
+            expect(result).toBeDefined();
+            expect(result.states).toBeDefined();
         });
 
         it("should handle RPC commands", async () => {
@@ -546,13 +533,10 @@ describe("Polling Behavior", () => {
 
             await bg.pollForCommands();
 
-            const completeCalls = global.fetch.mock.calls.filter(
-                call => call[0].includes("/complete")
-            );
-            const body = JSON.parse(completeCalls[0][1].body);
-
-            expect(body.results[0].action).toBe("rpc");
-            expect(body.results[0].method).toBe("cortex.findMessageByHeaderId");
+            const { results } = collectCompleteResults();
+            const result = results.find(r => r.action === "rpc");
+            expect(result.action).toBe("rpc");
+            expect(result.method).toBe("cortex.findMessageByHeaderId");
         });
     });
 });

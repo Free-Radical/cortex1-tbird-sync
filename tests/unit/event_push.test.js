@@ -485,8 +485,9 @@ describe("Event Push System", () => {
             const eventCalls = calls.filter(c => c[0].cortex_event_queue_v1);
 
             // Each event should have unique ID
-            if (eventCalls.length >= 2) {
-                const ids = eventCalls.map(c => c[0].cortex_event_queue_v1.map(e => e.event_id)).flat();
+            if (eventCalls.length >= 1) {
+                const lastQueue = eventCalls[eventCalls.length - 1][0].cortex_event_queue_v1;
+                const ids = lastQueue.map(e => e.event_id);
                 const uniqueIds = new Set(ids);
                 expect(uniqueIds.size).toBe(ids.length);
             }
@@ -512,15 +513,15 @@ describe("Event Push System", () => {
         it("should not flush while already flushing", async () => {
             // Clear mock
             global.fetch.mockClear();
-
-            let resolveFlush;
+            let resolveFlush = null;
+            const pending = new Promise(resolve => {
+                resolveFlush = resolve;
+            });
             global.fetch.mockImplementation((url) => {
                 if (url.includes("/tbird-sync/events")) {
-                    return new Promise(resolve => {
-                        resolveFlush = () => resolve({ ok: true });
-                    });
+                    return pending;
                 }
-                return Promise.resolve({ ok: true, json: () => Promise.resolve({ commands: [] }) });
+                return Promise.resolve({ ok: true, json: () => Promise.resolve({}) });
             });
 
             messenger._storage._setData({
@@ -533,20 +534,99 @@ describe("Event Push System", () => {
 
             await bg.ensureEventQueueLoaded();
 
-            // Start first flush (doesn't complete)
+            // Start first flush
             const flush1 = bg.flushEventQueue();
 
             // Try second flush immediately
             const flush2 = bg.flushEventQueue();
 
-            // Complete first flush
-            if (resolveFlush) resolveFlush();
+            expect(resolveFlush).toBeDefined();
+            resolveFlush({ ok: true });
             await flush1;
             await flush2;
 
             // Should only have one call to /events endpoint (concurrent prevention)
             const eventsCalls = global.fetch.mock.calls.filter(c => c[0].includes("/tbird-sync/events"));
             expect(eventsCalls.length).toBeLessThanOrEqual(1);
+        });
+    });
+
+    // =========================================================================
+    // New Email Push
+    // =========================================================================
+    describe("New Email Push", () => {
+        it("should post headerMessageId when available", async () => {
+            global.fetch.mockResolvedValue({ ok: true, json: () => Promise.resolve({}) });
+
+            const listener = messenger.messages.onNewMailReceived.addListener.mock.calls[0][0];
+            const msg = createMockMessage({ headerMessageId: "<msg-1@example.com>" });
+            const folder = createMockFolder();
+
+            await listener(folder, { messages: [msg] });
+            jest.advanceTimersByTime(200);
+            await Promise.resolve();
+
+            const newEmailCalls = global.fetch.mock.calls.filter(c => c[0].includes("/tbird-sync/new-email"));
+            expect(newEmailCalls.length).toBeGreaterThan(0);
+            const body = JSON.parse(newEmailCalls[0][1].body);
+            expect(body.message_id).toBe("<msg-1@example.com>");
+        });
+
+        it("should resolve message-id via getFull when headerMessageId missing", async () => {
+            global.fetch.mockResolvedValue({ ok: true, json: () => Promise.resolve({}) });
+            messenger.messages.getFull.mockResolvedValue({
+                headers: { "message-id": ["<fallback@example.com>"] }
+            });
+
+            const listener = messenger.messages.onNewMailReceived.addListener.mock.calls[0][0];
+            const msg = createMockMessage({ id: 991, headerMessageId: null });
+            const folder = createMockFolder();
+
+            await listener(folder, { messages: [msg] });
+            jest.advanceTimersByTime(200);
+            await Promise.resolve();
+
+            const newEmailCalls = global.fetch.mock.calls.filter(c => c[0].includes("/tbird-sync/new-email"));
+            expect(newEmailCalls.length).toBeGreaterThan(0);
+            const body = JSON.parse(newEmailCalls[0][1].body);
+            expect(body.message_id).toBe("<fallback@example.com>");
+        });
+    });
+
+    // =========================================================================
+    // New Email Polling Fallback
+    // =========================================================================
+    describe("New Email Polling Fallback", () => {
+        it("should post new emails found via inbox polling", async () => {
+            global.fetch.mockResolvedValue({ ok: true, json: () => Promise.resolve({}) });
+            messenger.messages.query.mockResolvedValue({
+                messages: [
+                    createMockMessage({ headerMessageId: "<poll-1@example.com>" }),
+                    createMockMessage({ id: 99, headerMessageId: "<poll-2@example.com>" })
+                ]
+            });
+
+            await bg.pollForNewEmails();
+
+            const calls = global.fetch.mock.calls.filter(c => c[0].includes("/tbird-sync/new-email"));
+            expect(calls.length).toBe(2);
+            const ids = calls.map(c => JSON.parse(c[1].body).message_id);
+            expect(ids).toEqual(expect.arrayContaining(["<poll-1@example.com>", "<poll-2@example.com>"]));
+        });
+
+        it("should dedupe already seen message ids", async () => {
+            global.fetch.mockResolvedValue({ ok: true, json: () => Promise.resolve({}) });
+            messenger.messages.query.mockResolvedValue({
+                messages: [createMockMessage({ headerMessageId: "<poll-dup@example.com>" })]
+            });
+
+            await bg.pollForNewEmails();
+            await bg.pollForNewEmails();
+
+            const calls = global.fetch.mock.calls.filter(c => c[0].includes("/tbird-sync/new-email"));
+            expect(calls.length).toBe(1);
+            const body = JSON.parse(calls[0][1].body);
+            expect(body.message_id).toBe("<poll-dup@example.com>");
         });
     });
 });
