@@ -143,6 +143,15 @@ const createMockMessenger = () => {
             getManifest: jest.fn(() => ({ version: "1.6.5" })),
             id: "cortex1-tbird-sync@example.com"
         },
+        downloads: {
+            download: jest.fn()
+        },
+        menus: {
+            create: jest.fn(),
+            onClicked: {
+                addListener: jest.fn()
+            }
+        },
         action: {
             onClicked: {
                 addListener: jest.fn()
@@ -150,6 +159,11 @@ const createMockMessenger = () => {
         },
         browserAction: {
             onClicked: {
+                addListener: jest.fn()
+            }
+        },
+        commands: {
+            onCommand: {
                 addListener: jest.fn()
             }
         },
@@ -306,6 +320,9 @@ module.exports = {
 
                 // Debug logger
                 DebugLogger,
+                FailureTracker,
+                exportDiagnostics,
+                buildDiagnosticsPayload,
 
                 // Tag handling
                 handleSetTags,
@@ -318,7 +335,8 @@ module.exports = {
                 POLL_INTERVAL_MS,
                 EVENT_QUEUE_LIMIT,
                 EVENT_BATCH_SIZE,
-                DEBUG_MAX_ENTRIES
+                DEBUG_MAX_ENTRIES,
+                FAILURE_MAX_ENTRIES
             });
         `;
 

@@ -26,11 +26,59 @@ let cachedCortexServerUrl = null;
 let hasLoadedCortexServerUrl = false;
 
 // =============================================================================
-// Debug Logging System - Rolling buffer keeping ONLY last 5 entries total
+// Debug Logging + Failure Tracking
 // =============================================================================
 
 const DEBUG_MAX_ENTRIES = 100;  // Keep only last 100 log entries total across all runs
+const FAILURE_MAX_ENTRIES = 50;
+const FAILURE_STORAGE_KEY = "cortex_recent_failures";
+const DIAGNOSTICS_SCHEMA_VERSION = 1;
 const IS_TEST_MODE = typeof globalThis !== "undefined" && !!globalThis.CORTEX_TEST_MODE;
+
+function shouldRecordFailure(category, message, data) {
+    if (data && data.error != null) return true;
+    const msg = String(message || "").toLowerCase();
+    if (!msg) return false;
+    return (
+        msg.includes("error") ||
+        msg.includes("fail") ||
+        msg.includes("exception") ||
+        msg.includes("timeout")
+    );
+}
+
+const FailureTracker = {
+    failures: [],
+
+    async init() {
+        try {
+            const stored = await messenger.storage.local.get([FAILURE_STORAGE_KEY]);
+            const entries = stored && stored[FAILURE_STORAGE_KEY];
+            this.failures = Array.isArray(entries) ? entries : [];
+        } catch (error) {
+            this.failures = [];
+        }
+    },
+
+    record(category, message, data = null) {
+        const ts = new Date().toISOString();
+        const entry = { ts, cat: category, msg: message, data };
+        this.failures.push(entry);
+        while (this.failures.length > FAILURE_MAX_ENTRIES) {
+            this.failures.shift();
+        }
+        messenger.storage.local.set({ [FAILURE_STORAGE_KEY]: this.failures }).catch(() => {});
+    },
+
+    getFailures() {
+        return this.failures;
+    },
+
+    clear() {
+        this.failures = [];
+        messenger.storage.local.set({ [FAILURE_STORAGE_KEY]: [] }).catch(() => {});
+    }
+};
 
 const DebugLogger = {
     enabled: false,
@@ -54,9 +102,9 @@ const DebugLogger = {
 
         // Add to buffer
         this.logs.push(entry);
-
-        // TODO(logging): Add an "Export Diagnostics" action to save logs + recent failures to a local
-        // JSON/JSONL file so debugging works even when cortex_server isn't installed/running.
+        if (shouldRecordFailure(category, message, data)) {
+            FailureTracker.record(category, message, data);
+        }
 
         // Keep only last 5 entries (flush old ones)
         while (this.logs.length > DEBUG_MAX_ENTRIES) {
@@ -92,6 +140,7 @@ const DebugLogger = {
 
 // Initialize debug logger
 DebugLogger.init();
+FailureTracker.init();
 
 let eventQueue = null;
 let eventQueueMeta = null;
@@ -132,6 +181,107 @@ async function isEventPushEnabled() {
         return value !== false;
     } catch (error) {
         return true;
+    }
+}
+
+function normalizeDiagnosticsFormat(value) {
+    const fmt = String(value || "").toLowerCase();
+    if (fmt === "jsonl" || fmt === "ndjson") return "jsonl";
+    return "json";
+}
+
+function buildDiagnosticsFilename(format) {
+    const ts = new Date().toISOString().replace(/[:.]/g, "-");
+    const ext = format === "jsonl" ? "jsonl" : "json";
+    return `cortex1-diagnostics-${ts}.${ext}`;
+}
+
+function buildDiagnosticsMeta(payload) {
+    return {
+        schemaVersion: payload.schemaVersion,
+        generatedAt: payload.generatedAt,
+        extensionVersion: payload.extensionVersion,
+        serverUrl: payload.serverUrl,
+        eventPushEnabled: payload.eventPushEnabled,
+        connectionState: payload.connectionState,
+        pollIntervalMs: payload.pollIntervalMs,
+        debugEnabled: payload.debug.enabled,
+        logCount: payload.debug.logs.length,
+        failureCount: payload.recentFailures.length,
+        eventQueue: payload.eventQueue
+    };
+}
+
+async function buildDiagnosticsPayload() {
+    const logs = DebugLogger.getLogs().map(entry => ({ ...entry }));
+    const failures = FailureTracker.getFailures().map(entry => ({ ...entry }));
+    const queueMeta = eventQueueMeta || {};
+
+    return {
+        schemaVersion: DIAGNOSTICS_SCHEMA_VERSION,
+        generatedAt: new Date().toISOString(),
+        extensionVersion: getExtensionVersion(),
+        serverUrl: await getCortexServerUrl(),
+        eventPushEnabled: await isEventPushEnabled(),
+        connectionState,
+        pollIntervalMs: currentPollInterval,
+        debug: {
+            enabled: DebugLogger.enabled,
+            logs
+        },
+        recentFailures: failures,
+        eventQueue: {
+            queued: eventQueue ? eventQueue.length : 0,
+            dropped: queueMeta.dropped || 0,
+            failures: queueMeta.failures || 0,
+            backoffMs: queueMeta.backoffMs || 0,
+            nextAttemptAtMs: queueMeta.nextAttemptAtMs || 0
+        }
+    };
+}
+
+function diagnosticsToJsonl(payload) {
+    const meta = buildDiagnosticsMeta(payload);
+    const lines = [JSON.stringify({ type: "meta", ...meta })];
+    for (const log of payload.debug.logs) {
+        lines.push(JSON.stringify({ type: "log", ...log }));
+    }
+    for (const failure of payload.recentFailures) {
+        lines.push(JSON.stringify({ type: "failure", ...failure }));
+    }
+    return lines.join("\n");
+}
+
+async function exportDiagnostics(options = {}) {
+    const format = normalizeDiagnosticsFormat(options.format);
+    const saveAs = options.saveAs !== false;
+    const payload = await buildDiagnosticsPayload();
+    const filename = buildDiagnosticsFilename(format);
+    const mime = format === "jsonl" ? "application/x-ndjson" : "application/json";
+    const body = format === "jsonl"
+        ? diagnosticsToJsonl(payload)
+        : JSON.stringify(payload, null, 2);
+    const url = `data:${mime};charset=utf-8,${encodeURIComponent(body)}`;
+
+    if (!messenger.downloads || typeof messenger.downloads.download !== "function") {
+        const error = "downloads API not available";
+        DebugLogger.log("diagnostics", "Export diagnostics failed", { error });
+        return { success: false, action: "export_diagnostics", error };
+    }
+
+    try {
+        const downloadId = await messenger.downloads.download({ url, filename, saveAs });
+        return {
+            success: true,
+            action: "export_diagnostics",
+            format,
+            filename,
+            downloadId
+        };
+    } catch (error) {
+        const message = error && error.message ? error.message : String(error);
+        DebugLogger.log("diagnostics", "Export diagnostics download failed", { error: message });
+        return { success: false, action: "export_diagnostics", error: message };
     }
 }
 
@@ -368,6 +518,19 @@ function safeAddListener(eventObj, handler) {
         }
     } catch (error) {
         // best-effort; avoid breaking startup on older TB versions
+    }
+}
+
+function registerDiagnosticsMenu() {
+    if (!messenger.menus || typeof messenger.menus.create !== "function") return;
+    try {
+        messenger.menus.create({
+            id: "export-diagnostics",
+            title: "Export Diagnostics",
+            contexts: ["browser_action"]
+        });
+    } catch (error) {
+        DebugLogger.log("diagnostics", "Menu create failed", { error: String(error) });
     }
 }
 
@@ -1739,6 +1902,11 @@ async function processCommand(cmd) {
                 count: states.length
             };
         }
+        case "export_diagnostics":
+            return await exportDiagnostics({
+                format: cmd.format || cmd.outputFormat || cmd.output_format,
+                saveAs: cmd.saveAs
+            });
         default:
             return { success: false, error: "Unknown action: " + cmd.action };
     }
@@ -2110,6 +2278,27 @@ const toolbarClickEvent =
     (messenger.browserAction && messenger.browserAction.onClicked);
 safeAddListener(toolbarClickEvent, () => {
     handleToolbarClick();
+});
+
+registerDiagnosticsMenu();
+const menuClickEvent = messenger.menus && messenger.menus.onClicked;
+safeAddListener(menuClickEvent, (info) => {
+    if (info && info.menuItemId === "export-diagnostics") {
+        return exportDiagnostics({ source: "menu" }).catch((error) => {
+            DebugLogger.log("diagnostics", "Export diagnostics menu failed", { error: String(error) });
+        });
+    }
+    return undefined;
+});
+
+const commandEvent = messenger.commands && messenger.commands.onCommand;
+safeAddListener(commandEvent, (command) => {
+    if (command === "export-diagnostics") {
+        return exportDiagnostics({ source: "command" }).catch((error) => {
+            DebugLogger.log("diagnostics", "Export diagnostics command failed", { error: String(error) });
+        });
+    }
+    return undefined;
 });
 
 // Watchdog timer: detects dead polling and forcibly resets the lock.

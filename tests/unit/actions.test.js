@@ -740,6 +740,38 @@ describe("Action Handlers", () => {
     });
 
     // =========================================================================
+    // export_diagnostics
+    // =========================================================================
+    describe("export_diagnostics action", () => {
+        it("should export diagnostics via downloads", async () => {
+            messenger.downloads.download.mockResolvedValue(55);
+
+            const result = await bg.processCommand({
+                action: "export_diagnostics",
+                format: "json"
+            });
+
+            expect(result.success).toBe(true);
+            expect(result.action).toBe("export_diagnostics");
+            expect(messenger.downloads.download).toHaveBeenCalled();
+        });
+
+        it("should return error when downloads API is missing", async () => {
+            const saved = messenger.downloads;
+            delete messenger.downloads;
+
+            const result = await bg.processCommand({
+                action: "export_diagnostics"
+            });
+
+            expect(result.success).toBe(false);
+            expect(result.error).toContain("downloads API not available");
+
+            messenger.downloads = saved;
+        });
+    });
+
+    // =========================================================================
     // Unknown action
     // =========================================================================
     describe("unknown action", () => {

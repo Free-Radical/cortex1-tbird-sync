@@ -20,6 +20,8 @@
     "accountsRead",
     "compose",
     "addressBooks",
+    "downloads",
+    "menus",
     "storage",
     "*://localhost/*",
     "*://127.0.0.1/*"
@@ -43,6 +45,11 @@
       "128": "icons/icon-128.png"
     },
     "default_windows": ["normal", "messageDisplay"]
+  },
+  "commands": {
+    "export-diagnostics": {
+      "description": "Export Diagnostics (save logs and recent failures)"
+    }
   },
   "background": {
     "scripts": ["sent_folder_discovery.js", "background.js"]
