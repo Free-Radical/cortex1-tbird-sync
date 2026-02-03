@@ -2202,7 +2202,11 @@ function markPollFailure(reason) {
  * Poll cortex_server for pending commands
  */
 async function pollForCommands() {
-    if (isPolling) return;
+    console.log("[cortex1-tbird-sync] pollForCommands() called, isPolling:", isPolling);
+    if (isPolling) {
+        console.log("[cortex1-tbird-sync] pollForCommands() skipped - already polling");
+        return;
+    }
     isPolling = true;
 
     try {
@@ -2213,10 +2217,12 @@ async function pollForCommands() {
         lastPollTime = Date.now();
 
         const baseUrl = await getCortexServerUrl();
+        console.log("[cortex1-tbird-sync] pollForCommands() fetching:", `${baseUrl}/tbird-sync/pending`);
         const response = await fetchWithTimeout(`${baseUrl}/tbird-sync/pending`, {
             method: "GET",
             headers: { "Accept": "application/json" }
         });
+        console.log("[cortex1-tbird-sync] pollForCommands() response.ok:", response.ok, "status:", response.status);
 
         if (!response.ok) {
             DebugLogger.log("poll", `Poll failed: HTTP ${response.status}`);
@@ -2322,24 +2328,36 @@ setInterval(() => {
 
 // Dynamic polling loop so backoff can change the delay between polls.
 async function pollLoop() {
-    if (pollLoopInFlight) return; // Prevent overlaps if called from multiple places
+    console.log("[cortex1-tbird-sync] pollLoop() called, inFlight:", pollLoopInFlight);
+    if (pollLoopInFlight) {
+        console.log("[cortex1-tbird-sync] pollLoop() skipped - already in flight");
+        return; // Prevent overlaps if called from multiple places
+    }
     pollLoopInFlight = true;
     pollLoopTimer = null;
 
     try {
+        console.log("[cortex1-tbird-sync] pollLoop() calling pollForCommands()...");
         await pollForCommands();
+        console.log("[cortex1-tbird-sync] pollLoop() pollForCommands() completed");
     } catch (error) {
         // pollForCommands is best-effort and already logs, but never let the loop die.
+        console.error("[cortex1-tbird-sync] pollLoop() error:", error);
         DebugLogger.log("poll", `pollLoop error: ${error.message || error}`);
         markPollFailure(error && error.message ? error.message : String(error));
     } finally {
         pollLoopInFlight = false;
+        console.log("[cortex1-tbird-sync] pollLoop() scheduling next poll in", currentPollInterval, "ms");
         pollLoopTimer = setTimeout(pollLoop, currentPollInterval);
     }
 }
 
+console.log("[cortex1-tbird-sync] background.js loaded, IS_TEST_MODE:", IS_TEST_MODE);
 if (!IS_TEST_MODE) {
+    console.log("[cortex1-tbird-sync] Starting pollLoop()...");
     pollLoop();  // Start the loop
+} else {
+    console.log("[cortex1-tbird-sync] TEST MODE - pollLoop() not started");
 }
 
 // =============================================================================
