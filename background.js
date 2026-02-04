@@ -9,6 +9,16 @@ const DEFAULT_CORTEX_SERVER = "http://localhost:5001";
 const CORTEX_SERVER_STORAGE_KEY = "cortex_server_url";
 const POLL_INTERVAL_MS = 3000;  // Poll every 3 seconds
 
+// =============================================================================
+// WebSocket Connection (preferred transport)
+// =============================================================================
+
+let ws = null;
+let wsReconnectAttempts = 0;
+let wsReconnectTimer = null;
+const WS_MAX_RECONNECT_DELAY = 30000; // 30s max
+const WS_BASE_DELAY = 1000; // 1s base
+
 // Optional: direct HTTP push of Thunderbird events to cortex_server
 const EVENT_PUSH_PATH = "/tbird-sync/events";
 const EVENT_PUSH_ENABLED_KEY = "cortex_event_push_enabled";
@@ -445,8 +455,14 @@ async function enqueueEvent(eventType, payload) {
 }
 
 async function postEventBatch(events) {
+    if (sendWebSocketMessage({ type: "event", event: { events }, data: { events } })) {
+        console.log("[WS] Sent event batch", { count: events.length });
+        return true;
+    }
+
     const baseUrl = await getCortexServerUrl();
     const url = `${baseUrl}${EVENT_PUSH_PATH}`;
+    console.log("[HTTP] Posting event batch", { count: events.length });
 
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), EVENT_POST_TIMEOUT_MS);
@@ -1913,6 +1929,156 @@ async function processCommand(cmd) {
 }
 
 // =============================================================================
+// WebSocket Client (preferred, with HTTP fallback)
+// =============================================================================
+
+let httpPollingEnabled = false;
+
+function isWebSocketOpen() {
+    return ws && ws.readyState === WebSocket.OPEN;
+}
+
+async function getWebSocketUrl() {
+    const baseUrl = await getCortexServerUrl();
+    try {
+        const parsed = new URL(baseUrl);
+        const protocol = parsed.protocol === "https:" ? "wss:" : "ws:";
+        return `${protocol}//${parsed.host}/tbird-sync/ws`;
+    } catch (error) {
+        const wsBase = String(baseUrl || "").replace(/^http(s?):/i, (match, secure) => (secure ? "wss:" : "ws:"));
+        return `${wsBase.replace(/\/+$/, "")}/tbird-sync/ws`;
+    }
+}
+
+function sendWebSocketMessage(msg) {
+    if (!isWebSocketOpen()) return false;
+    try {
+        ws.send(JSON.stringify(msg));
+        return true;
+    } catch (error) {
+        console.error("[WS] Send failed:", error);
+        return false;
+    }
+}
+
+async function handleWebSocketMessage(msg) {
+    if (!msg || typeof msg !== "object") {
+        console.warn("[WS] Ignoring non-object message");
+        return;
+    }
+
+    const msgType = msg.type;
+    if (msgType === "command" || msgType === "commands") {
+        let commands = [];
+        if (msgType === "command") {
+            const cmd = msg.data || msg.command || msg;
+            if (cmd) commands = [cmd];
+        } else {
+            commands = msg.commands || msg.data || [];
+        }
+
+        // Reuse existing command pipeline (queue + workers).
+        const enqueued = enqueueCommands(commands);
+        if (IS_TEST_MODE && enqueued > 0) {
+            await runWorkerLoop("fast");
+            await runWorkerLoop("slow");
+        }
+        if (commands.length > 0) {
+            DebugLogger.log("poll", `WS received ${commands.length} command(s)`, {
+                actions: commands.map(c => c && c.action ? c.action : null),
+                enqueued
+            });
+        }
+        return;
+    }
+
+    if (msgType === "ping") {
+        sendWebSocketMessage({ type: "pong", data: { timestamp: Date.now() } });
+        return;
+    }
+
+    if (msgType === "pong") return;
+
+    console.warn("[WS] Unknown message type:", msgType);
+}
+
+function startHttpPolling() {
+    if (httpPollingEnabled) return;
+    httpPollingEnabled = true;
+    console.log("[HTTP] Starting fallback polling");
+    if (!pollLoopInFlight && !pollLoopTimer) {
+        pollLoopTimer = setTimeout(pollLoop, 0);
+    }
+}
+
+function stopHttpPolling() {
+    if (!httpPollingEnabled) return;
+    httpPollingEnabled = false;
+    if (pollLoopTimer) {
+        clearTimeout(pollLoopTimer);
+        pollLoopTimer = null;
+    }
+    console.log("[HTTP] Stopped polling");
+}
+
+function scheduleReconnect() {
+    if (wsReconnectTimer) return;
+    wsReconnectAttempts += 1;
+    const delay = Math.min(
+        WS_BASE_DELAY * Math.pow(2, wsReconnectAttempts - 1),
+        WS_MAX_RECONNECT_DELAY
+    );
+    console.log(`[WS] Reconnecting in ${delay}ms (attempt ${wsReconnectAttempts})`);
+    wsReconnectTimer = setTimeout(() => {
+        wsReconnectTimer = null;
+        connectWebSocket();
+    }, delay);
+
+    startHttpPolling();
+    connectionState = "RECONNECTING";
+}
+
+async function connectWebSocket() {
+    if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) {
+        return;
+    }
+
+    const wsUrl = await getWebSocketUrl();
+    try {
+        ws = new WebSocket(wsUrl);
+
+        ws.onopen = () => {
+            console.log("[WS] Connected to cortex-server");
+            wsReconnectAttempts = 0;
+            stopHttpPolling();
+            connectionState = "CONNECTED";
+        };
+
+        ws.onmessage = async (event) => {
+            try {
+                const msg = JSON.parse(event.data);
+                await handleWebSocketMessage(msg);
+            } catch (error) {
+                console.error("[WS] Message error:", error);
+            }
+        };
+
+        ws.onerror = (error) => {
+            console.error("[WS] Error:", error);
+        };
+
+        ws.onclose = () => {
+            console.log("[WS] Disconnected, will reconnect...");
+            ws = null;
+            scheduleReconnect();
+        };
+    } catch (error) {
+        console.error("[WS] Failed to connect:", error);
+        scheduleReconnect();
+    }
+}
+
+// =============================================================================
 // Bulletproof polling loop (timeouts, watchdog, backoff, and heartbeat logging)
 // =============================================================================
 
@@ -2143,11 +2309,35 @@ async function flushCompletions() {
     completionFlushInFlight = true;
 
     try {
+        if (isWebSocketOpen()) {
+            while (completionQueue.length > 0) {
+                const batch = completionQueue.slice(0, 25);
+                const sent = sendWebSocketMessage({
+                    type: "results",
+                    results: batch,
+                    data: batch
+                });
+                if (!sent) break;
+
+                console.log("[WS] Sent completion batch", { count: batch.length, remaining: completionQueue.length - batch.length });
+                completionQueue.splice(0, batch.length);
+                for (const r of batch) {
+                    const id = r && r.id != null ? String(r.id) : null;
+                    if (id) knownCommandIds.delete(id);
+                }
+
+                DebugLogger.log("complete", "Posted results via WS", { sent: batch.length, remaining: completionQueue.length });
+            }
+        }
+
+        if (completionQueue.length === 0) return;
+
         const baseUrl = await getCortexServerUrl();
 
         // Post in small batches so a single large payload can't wedge completion.
         while (completionQueue.length > 0) {
             const batch = completionQueue.slice(0, 25);
+            console.log("[HTTP] Posting completion batch", { count: batch.length, remaining: completionQueue.length });
             const response = await fetchWithTimeout(`${baseUrl}/tbird-sync/complete`, {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
@@ -2309,6 +2499,7 @@ safeAddListener(commandEvent, (command) => {
 
 // Watchdog timer: detects dead polling and forcibly resets the lock.
 setInterval(() => {
+    if (!httpPollingEnabled) return;
     const silentMs = Date.now() - lastPollTime;
     if (silentMs > 60000) {  // No poll started for 60s
         DebugLogger.log("watchdog", `Polling stalled for ${silentMs}ms, forcing isPolling=false`, {
@@ -2329,6 +2520,10 @@ setInterval(() => {
 // Dynamic polling loop so backoff can change the delay between polls.
 async function pollLoop() {
     console.log("[cortex1-tbird-sync] pollLoop() called, inFlight:", pollLoopInFlight);
+    if (!httpPollingEnabled) {
+        console.log("[HTTP] pollLoop() skipped - HTTP polling disabled");
+        return;
+    }
     if (pollLoopInFlight) {
         console.log("[cortex1-tbird-sync] pollLoop() skipped - already in flight");
         return; // Prevent overlaps if called from multiple places
@@ -2347,15 +2542,20 @@ async function pollLoop() {
         markPollFailure(error && error.message ? error.message : String(error));
     } finally {
         pollLoopInFlight = false;
-        console.log("[cortex1-tbird-sync] pollLoop() scheduling next poll in", currentPollInterval, "ms");
-        pollLoopTimer = setTimeout(pollLoop, currentPollInterval);
+        if (httpPollingEnabled) {
+            console.log("[cortex1-tbird-sync] pollLoop() scheduling next poll in", currentPollInterval, "ms");
+            pollLoopTimer = setTimeout(pollLoop, currentPollInterval);
+        } else {
+            console.log("[HTTP] pollLoop() stopped - HTTP polling disabled");
+        }
     }
 }
 
 console.log("[cortex1-tbird-sync] background.js loaded, IS_TEST_MODE:", IS_TEST_MODE);
 if (!IS_TEST_MODE) {
-    console.log("[cortex1-tbird-sync] Starting pollLoop()...");
-    pollLoop();  // Start the loop
+    // Try WebSocket first; HTTP polling starts automatically if WS fails.
+    console.log("[cortex1-tbird-sync] Starting WebSocket...");
+    connectWebSocket();
 } else {
     console.log("[cortex1-tbird-sync] TEST MODE - pollLoop() not started");
 }
@@ -2401,8 +2601,23 @@ async function resolveNewEmailMessageId(msg) {
 async function flushNewEmailBatch() {
     const batch = newEmailBatch.splice(0);
     if (!batch.length) return;
+
+    let startIndex = 0;
+    if (isWebSocketOpen()) {
+        for (; startIndex < batch.length; startIndex += 1) {
+            const payload = batch[startIndex];
+            const event = { type: "new_email", ...payload };
+            const sent = sendWebSocketMessage({ type: "event", event, data: event });
+            if (!sent) break;
+            DebugLogger.log("new-email", "Posted new email via WS", { message_id: payload.message_id });
+        }
+    }
+
+    if (startIndex >= batch.length) return;
+
     const baseUrl = await getCortexServerUrl();
-    await Promise.all(batch.map(async (payload) => {
+    const remaining = batch.slice(startIndex);
+    await Promise.all(remaining.map(async (payload) => {
         try {
             const response = await fetchWithTimeout(`${baseUrl}/tbird-sync/new-email`, {
                 method: "POST",
