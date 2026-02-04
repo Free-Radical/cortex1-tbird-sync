@@ -251,9 +251,8 @@ wss.on('connection', (ws) => {
         console.error('[STUB-WS] Error:', error);
     });
 
-    // Send pending commands via WS when client connects
-    if (pendingCommands.length > 0) {
-        const cmd = pendingCommands[0];
+    // Send ALL pending commands via WS when client connects
+    for (const cmd of pendingCommands) {
         ws.send(JSON.stringify({
             type: 'command',
             data: cmd
@@ -274,13 +273,7 @@ function handleWebSocketMessage(ws, msg) {
             if (idx >= 0) {
                 pendingCommands.splice(idx, 1);
             }
-            // Send next command if available
-            if (pendingCommands.length > 0) {
-                ws.send(JSON.stringify({
-                    type: 'command',
-                    data: pendingCommands[0]
-                }));
-            }
+            // Note: Don't send next command here - commands are pushed when added
             break;
 
         case 'event':
