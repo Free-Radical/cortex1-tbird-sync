@@ -375,4 +375,120 @@ describe("Load Tests with Stub Server", () => {
             expect(stats.data.eventsReceived).toBe(100);
         }, 15000);
     });
+
+    // =========================================================================
+    // WebSocket Load Tests (NEW)
+    // =========================================================================
+    describe("WebSocket Command Push", () => {
+        const WebSocket = require("ws");
+
+        async function connectWebSocket() {
+            return new Promise((resolve, reject) => {
+                const ws = new WebSocket(`ws://localhost:${STUB_PORT}/tbird-sync/ws`);
+                ws.on("open", () => resolve(ws));
+                ws.on("error", reject);
+                setTimeout(() => reject(new Error("WS connection timeout")), 5000);
+            });
+        }
+
+        it("should push commands via WebSocket when added", async () => {
+            const ws = await connectWebSocket();
+            let receivedCommand = null;
+
+            ws.on("message", (data) => {
+                const msg = JSON.parse(data.toString());
+                if (msg.type === "command") {
+                    receivedCommand = msg.data;
+                }
+            });
+
+            // Add command via HTTP
+            await request("POST", "/test/add-command", {
+                action: "fetch_unread",
+                params: { limit: 10 }
+            });
+
+            // Wait for WS push
+            await new Promise(resolve => setTimeout(resolve, 100));
+
+            expect(receivedCommand).not.toBeNull();
+            expect(receivedCommand.action).toBe("fetch_unread");
+
+            ws.close();
+        }, 10000);
+
+        it("should receive results via WebSocket", async () => {
+            const ws = await connectWebSocket();
+
+            // Add command first
+            const cmdResp = await request("POST", "/test/add-command", {
+                action: "get_status"
+            });
+            const cmdId = cmdResp.data.command.id;
+
+            // Wait for command push
+            await new Promise(resolve => setTimeout(resolve, 100));
+
+            // Send result via WS
+            ws.send(JSON.stringify({
+                type: "result",
+                data: {
+                    id: cmdId,
+                    action: "get_status",
+                    success: true,
+                    result: { status: "ok" }
+                }
+            }));
+
+            // Wait for processing
+            await new Promise(resolve => setTimeout(resolve, 100));
+
+            // Verify result was received
+            const stats = await request("GET", "/test/stats");
+            expect(stats.data.commandsCompleted).toBeGreaterThan(0);
+
+            ws.close();
+        }, 10000);
+
+        it("should handle 50 commands via WebSocket rapidly", async () => {
+            const ws = await connectWebSocket();
+            const received = [];
+
+            ws.on("message", (data) => {
+                const msg = JSON.parse(data.toString());
+                if (msg.type === "command") {
+                    received.push(msg.data);
+                    // Auto-respond with result
+                    ws.send(JSON.stringify({
+                        type: "result",
+                        data: {
+                            id: msg.data.id,
+                            action: msg.data.action,
+                            success: true
+                        }
+                    }));
+                }
+            });
+
+            // Add 50 commands rapidly
+            const start = Date.now();
+            for (let i = 0; i < 50; i++) {
+                await request("POST", "/test/add-command", {
+                    action: `test_${i}`
+                });
+            }
+
+            // Wait for all to process
+            await new Promise(resolve => setTimeout(resolve, 500));
+
+            const elapsed = Date.now() - start;
+            const rate = (50 / (elapsed / 1000)).toFixed(1);
+
+            console.log(`\n50 WS commands: ${received.length} received in ${elapsed}ms (${rate}/s)`);
+
+            expect(received.length).toBeGreaterThanOrEqual(45); // Allow some to be in-flight
+
+            ws.close();
+        }, 15000);
+    });
 });

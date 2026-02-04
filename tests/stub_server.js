@@ -21,6 +21,7 @@
  */
 
 const http = require("http");
+const WebSocket = require("ws");
 
 const PORT = parseInt(process.argv[2] || "5001", 10);
 
@@ -139,6 +140,10 @@ async function handleRequest(req, res) {
                 ...body,
             };
             pendingCommands.push(cmd);
+            // Broadcast to WebSocket clients
+            if (wsClients.size > 0) {
+                broadcastCommand(cmd);
+            }
             sendJson(res, { status: "added", command: cmd });
             return;
         }
@@ -217,14 +222,110 @@ async function handleRequest(req, res) {
 
 const server = http.createServer(handleRequest);
 
+// ============================================================================
+// WebSocket Server for real-time command push
+// ============================================================================
+
+const wss = new WebSocket.Server({ server });
+const wsClients = new Set();
+
+wss.on('connection', (ws) => {
+    console.log('[STUB-WS] Client connected');
+    wsClients.add(ws);
+
+    ws.on('message', (data) => {
+        try {
+            const msg = JSON.parse(data.toString());
+            handleWebSocketMessage(ws, msg);
+        } catch (error) {
+            console.error('[STUB-WS] Failed to parse message:', error);
+        }
+    });
+
+    ws.on('close', () => {
+        console.log('[STUB-WS] Client disconnected');
+        wsClients.delete(ws);
+    });
+
+    ws.on('error', (error) => {
+        console.error('[STUB-WS] Error:', error);
+    });
+
+    // Send pending commands via WS when client connects
+    if (pendingCommands.length > 0) {
+        const cmd = pendingCommands[0];
+        ws.send(JSON.stringify({
+            type: 'command',
+            data: cmd
+        }));
+    }
+});
+
+function handleWebSocketMessage(ws, msg) {
+    const { type, data } = msg;
+
+    switch (type) {
+        case 'result':
+            // Store result
+            completedResults.push(data);
+            stats.commandsCompleted++;
+            // Remove from pending
+            const idx = pendingCommands.findIndex(c => c.id === data.id);
+            if (idx >= 0) {
+                pendingCommands.splice(idx, 1);
+            }
+            // Send next command if available
+            if (pendingCommands.length > 0) {
+                ws.send(JSON.stringify({
+                    type: 'command',
+                    data: pendingCommands[0]
+                }));
+            }
+            break;
+
+        case 'event':
+            // Store event
+            if (data.events) {
+                receivedEvents.push(...data.events);
+                stats.eventsReceived += data.events.length;
+            } else {
+                receivedEvents.push(data);
+                stats.eventsReceived++;
+            }
+            break;
+
+        case 'pong':
+            // Acknowledge pong (connection is alive)
+            break;
+
+        default:
+            console.warn('[STUB-WS] Unknown message type:', type);
+    }
+}
+
+// Helper to broadcast commands via WebSocket
+function broadcastCommand(command) {
+    const msg = JSON.stringify({
+        type: 'command',
+        data: command
+    });
+    wsClients.forEach(ws => {
+        if (ws.readyState === WebSocket.OPEN) {
+            ws.send(msg);
+        }
+    });
+}
+
 server.listen(PORT, () => {
     console.log(`Stub Cortex Server running on http://localhost:${PORT}`);
+    console.log(`WebSocket endpoint: ws://localhost:${PORT}/tbird-sync/ws`);
     console.log("Endpoints:");
     console.log("  GET  /tbird-sync/pending");
     console.log("  POST /tbird-sync/new-email");
     console.log("  POST /tbird-sync/complete");
     console.log("  GET  /tbird-sync/status");
     console.log("  POST /tbird-sync/events");
+    console.log("  WS   /tbird-sync/ws (NEW)");
     console.log("Control:");
     console.log("  POST /test/add-command");
     console.log("  POST /test/clear");
