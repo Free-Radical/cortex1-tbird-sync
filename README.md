@@ -1,15 +1,27 @@
 # cortex1-tbird-sync
 
-Thunderbird extension that syncs message status with cortex_server via polling, with optional direct HTTP event push.
+Thunderbird extension that syncs message status with cortex_server via **WebSocket IPC** (primary) with HTTP polling fallback.
 
 ## Overview
 
-The extension polls `localhost:5001` every 3 seconds for pending sync commands:
+The extension communicates with cortex_server at `localhost:5001` using:
+
+1. **WebSocket (Primary)** - Real-time bidirectional communication via `ws://localhost:5001/tbird-sync/ws`
+   - Server pushes commands immediately (no polling delay)
+   - Extension sends results/events back via WebSocket
+   - Auto-reconnect with exponential backoff (1s → 2s → 4s → ... → 30s max)
+
+2. **HTTP Polling (Fallback)** - Activates when WebSocket is unavailable
+   - Polls `GET /tbird-sync/pending` every 3 seconds
+   - Posts results to `POST /tbird-sync/complete`
+
+**Supported operations:**
 - Mark messages as read/unread
 - Set flagged status
+- Archive, move, delete messages
 - Execute generic allowlisted RPC calls into Thunderbird's WebExtension APIs
 
-It also exposes a toolbar button ("Cortex1 Sync") for a manual kick to flush/poll.
+It also exposes a toolbar button ("Cortex1 Sync") for manual sync.
 
 No native messaging, no Python helper - just install the .xpi.
 
@@ -27,6 +39,30 @@ Note: In newer Thunderbird/Betterbird versions, the "Cortex1 Sync" button may be
 
 ## How It Works
 
+### WebSocket Mode (Primary)
+
+```
+┌─────────────────┐                    ┌──────────────────┐
+│ cortex_server   │ ═══ WebSocket ════ │ TB Extension     │
+│ (port 5001)     │ ws://localhost:5001│                  │
+│                 │   /tbird-sync/ws   │                  │
+└─────────────────┘                    └──────────────────┘
+      │                                        │
+      │  ─── {type:"command", data:{...}} ───▶ │
+      │  ◀── {type:"result", data:{...}} ────  │
+      │  ◀── {type:"event", data:{...}} ─────  │
+      │  ─── {type:"ping"} ─────────────────▶  │
+      │  ◀── {type:"pong"} ─────────────────── │
+```
+
+1. Extension connects to WebSocket on startup
+2. Server pushes commands in real-time (no polling delay)
+3. Extension executes commands via `messenger.messages.update()`
+4. Extension sends results/events back via WebSocket
+5. Auto-reconnect with exponential backoff if disconnected
+
+### HTTP Fallback Mode
+
 ```
 ┌─────────────────┐                    ┌──────────────────┐
 │ cortex_server   │ <── GET /pending ──│ TB Extension     │
@@ -35,17 +71,37 @@ Note: In newer Thunderbird/Betterbird versions, the "Cortex1 Sync" button may be
 └─────────────────┘                    └──────────────────┘
 ```
 
+Activates automatically when WebSocket is unavailable:
 1. Extension polls `GET /tbird-sync/pending` every 3 seconds
 2. Server returns list of commands: `{commands: [{action: "mark_read", messageId: "..."}]}`
 3. Extension executes commands via `messenger.messages.update()`
 4. Extension reports results via `POST /tbird-sync/complete`
-
-Optionally, the extension can also push events (new mail, moved/deleted/updated, compose send events, etc.) directly to cortex_server:
-- `POST /tbird-sync/events` with `{events: [...]}`
+5. Events posted to `POST /tbird-sync/events`
 
 ## Server Endpoints (cortex_server)
 
 The extension expects these endpoints on `localhost:5001`:
+
+### WebSocket Endpoint (Primary)
+
+**WS /tbird-sync/ws**
+
+Bidirectional WebSocket for real-time communication.
+
+**Server → Extension messages:**
+```json
+{"type": "command", "data": {"id": "uuid", "action": "mark_read", "messageId": "..."}}
+{"type": "ping", "data": {}}
+```
+
+**Extension → Server messages:**
+```json
+{"type": "result", "data": {"id": "uuid", "success": true, "action": "mark_read"}}
+{"type": "event", "data": {"event_type": "messages.onNewMailReceived", ...}}
+{"type": "pong", "data": {"timestamp": 1234567890}}
+```
+
+### HTTP Endpoints (Fallback)
 
 **GET /tbird-sync/pending**
 ```json
