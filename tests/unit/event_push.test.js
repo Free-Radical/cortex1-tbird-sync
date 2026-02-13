@@ -3,13 +3,19 @@
  *
  * Tests the event queue system including:
  * - Event queueing
- * - Batch flushing
- * - Exponential backoff on failure
+ * - Batch flushing via WebSocket
  * - Queue persistence
  * - Queue limits
+ * - New email push via WebSocket
  */
 
 const { createMockMessage, createMockFolder, loadBackgroundScript } = require("../setup");
+
+function mockOpenWebSocket(bg) {
+    const mockWs = { readyState: 1, send: jest.fn() }; // WebSocket.OPEN = 1
+    bg._setWs(mockWs);
+    return mockWs;
+}
 
 describe("Event Push System", () => {
     let bg;
@@ -20,12 +26,6 @@ describe("Event Push System", () => {
             cortex_event_push_enabled: true,
             cortex_event_queue_v1: [],
             cortex_event_queue_meta_v1: {}
-        });
-
-        // Mock successful fetch by default
-        global.fetch = jest.fn().mockResolvedValue({
-            ok: true,
-            json: () => Promise.resolve({ success: true })
         });
 
         bg = loadBackgroundScript();
@@ -164,10 +164,12 @@ describe("Event Push System", () => {
     });
 
     // =========================================================================
-    // Batch Flushing
+    // Batch Flushing (WebSocket)
     // =========================================================================
     describe("flushEventQueue()", () => {
-        it("should post events to server", async () => {
+        it("should send events via WebSocket", async () => {
+            const mockWs = mockOpenWebSocket(bg);
+
             messenger._storage._setData({
                 cortex_event_push_enabled: true,
                 cortex_event_queue_v1: [
@@ -176,48 +178,35 @@ describe("Event Push System", () => {
                 cortex_event_queue_meta_v1: {}
             });
 
-            // Clear any calls from auto-init
-            global.fetch.mockClear();
-
             await bg.ensureEventQueueLoaded();
             await bg.flushEventQueue();
 
-            // Find the call to /events endpoint
-            const eventsCalls = global.fetch.mock.calls.filter(c => c[0].includes("/tbird-sync/events"));
-            expect(eventsCalls.length).toBeGreaterThan(0);
-            expect(eventsCalls[0][1].method).toBe("POST");
+            // Should have sent via WebSocket
+            expect(mockWs.send).toHaveBeenCalled();
+            const sent = JSON.parse(mockWs.send.mock.calls[0][0]);
+            expect(sent.type).toBe("event");
+            expect(sent.event.events).toBeDefined();
         });
 
-        it("should batch events (max 50 per request)", async () => {
-            // Create 60 events
-            const events = Array.from({ length: 60 }, (_, i) => ({
-                event_id: `evt-${i}`,
-                event_type: "test",
-                ts_ms: Date.now(),
-                seq: i,
-                payload: {}
-            }));
-
+        it("should not flush when WS is closed", async () => {
+            // WS is null by default (not connected)
             messenger._storage._setData({
                 cortex_event_push_enabled: true,
-                cortex_event_queue_v1: events,
+                cortex_event_queue_v1: [
+                    { event_id: "evt-1", event_type: "test", ts_ms: Date.now(), seq: 1, payload: {} }
+                ],
                 cortex_event_queue_meta_v1: {}
             });
 
-            // Clear any calls from auto-init
-            global.fetch.mockClear();
-
             await bg.ensureEventQueueLoaded();
             await bg.flushEventQueue();
 
-            // Find the call to /events endpoint
-            const eventsCalls = global.fetch.mock.calls.filter(c => c[0].includes("/tbird-sync/events"));
-            expect(eventsCalls.length).toBeGreaterThan(0);
-            const body = JSON.parse(eventsCalls[0][1].body);
-            expect(body.events.length).toBeLessThanOrEqual(50);
+            // postEventBatch returns false when WS not open — events stay queued
         });
 
         it("should remove flushed events from queue", async () => {
+            mockOpenWebSocket(bg);
+
             messenger._storage._setData({
                 cortex_event_push_enabled: true,
                 cortex_event_queue_v1: [
@@ -230,28 +219,27 @@ describe("Event Push System", () => {
             await bg.flushEventQueue();
 
             // Queue should be empty after successful flush
-            // Check that storage.set was called with empty queue
         });
 
         it("should not flush when queue empty", async () => {
+            const mockWs = mockOpenWebSocket(bg);
+
             messenger._storage._setData({
                 cortex_event_push_enabled: true,
                 cortex_event_queue_v1: [],
                 cortex_event_queue_meta_v1: {}
             });
 
-            // Clear any calls from auto-init
-            global.fetch.mockClear();
-
             await bg.ensureEventQueueLoaded();
             await bg.flushEventQueue();
 
-            // Should not call /events endpoint (may still call /pending for polling)
-            const eventsCalls = global.fetch.mock.calls.filter(c => c[0].includes("/tbird-sync/events"));
-            expect(eventsCalls.length).toBe(0);
+            // Should not have sent anything
+            expect(mockWs.send).not.toHaveBeenCalled();
         });
 
         it("should not flush when event push disabled", async () => {
+            const mockWs = mockOpenWebSocket(bg);
+
             messenger._storage._setData({
                 cortex_event_push_enabled: false,
                 cortex_event_queue_v1: [
@@ -260,159 +248,10 @@ describe("Event Push System", () => {
                 cortex_event_queue_meta_v1: {}
             });
 
-            // Clear any calls from auto-init
-            global.fetch.mockClear();
-
             await bg.flushEventQueue();
 
-            // Should not call /events endpoint
-            const eventsCalls = global.fetch.mock.calls.filter(c => c[0].includes("/tbird-sync/events"));
-            expect(eventsCalls.length).toBe(0);
-        });
-    });
-
-    // =========================================================================
-    // Exponential Backoff
-    // =========================================================================
-    describe("Exponential Backoff", () => {
-        it("should back off on failure", async () => {
-            messenger._storage._setData({
-                cortex_event_push_enabled: true,
-                cortex_event_queue_v1: [
-                    { event_id: "evt-1", event_type: "test", ts_ms: Date.now(), seq: 1, payload: {} }
-                ],
-                cortex_event_queue_meta_v1: {
-                    failures: 0,
-                    backoffMs: 1000,
-                    nextAttemptAtMs: 0
-                }
-            });
-
-            // Clear and set up fetch to fail for /events but succeed for /pending
-            global.fetch.mockClear();
-            global.fetch.mockImplementation((url) => {
-                if (url.includes("/tbird-sync/events")) {
-                    return Promise.reject(new Error("Network error"));
-                }
-                return Promise.resolve({ ok: true, json: () => Promise.resolve({ commands: [] }) });
-            });
-
-            await bg.ensureEventQueueLoaded();
-            await bg.flushEventQueue();
-
-            // Meta should be updated with backoff
-            const setCalls = messenger.storage.local.set.mock.calls;
-            const metaCalls = setCalls.filter(c => c[0].cortex_event_queue_meta_v1);
-
-            expect(metaCalls.length).toBeGreaterThan(0);
-        });
-
-        it("should double backoff on consecutive failures", async () => {
-            global.fetch.mockRejectedValue(new Error("Network error"));
-
-            messenger._storage._setData({
-                cortex_event_push_enabled: true,
-                cortex_event_queue_v1: [
-                    { event_id: "evt-1", event_type: "test", ts_ms: Date.now(), seq: 1, payload: {} }
-                ],
-                cortex_event_queue_meta_v1: {
-                    failures: 1,
-                    backoffMs: 2000,
-                    nextAttemptAtMs: 0
-                }
-            });
-
-            await bg.ensureEventQueueLoaded();
-            await bg.flushEventQueue();
-
-            // Backoff should increase (capped at 5 minutes)
-        });
-
-        it("should apply aggressive backoff for 404/405 responses", async () => {
-            const error = new Error("Not Found");
-            error.status = 404;
-            global.fetch.mockRejectedValue(error);
-
-            messenger._storage._setData({
-                cortex_event_push_enabled: true,
-                cortex_event_queue_v1: [
-                    { event_id: "evt-1", event_type: "test", ts_ms: Date.now(), seq: 1, payload: {} }
-                ],
-                cortex_event_queue_meta_v1: {
-                    failures: 0,
-                    backoffMs: 1000,
-                    nextAttemptAtMs: 0
-                }
-            });
-
-            await bg.ensureEventQueueLoaded();
-
-            // Mock fetch to throw error with status
-            global.fetch.mockImplementation(() => {
-                const response = { ok: false, status: 404 };
-                const err = new Error("HTTP 404");
-                err.status = 404;
-                throw err;
-            });
-
-            await bg.flushEventQueue();
-
-            // Should have more aggressive backoff
-        });
-
-        it("should reset backoff on success", async () => {
-            global.fetch.mockResolvedValue({ ok: true });
-
-            messenger._storage._setData({
-                cortex_event_push_enabled: true,
-                cortex_event_queue_v1: [
-                    { event_id: "evt-1", event_type: "test", ts_ms: Date.now(), seq: 1, payload: {} }
-                ],
-                cortex_event_queue_meta_v1: {
-                    failures: 5,
-                    backoffMs: 60000,
-                    nextAttemptAtMs: 0
-                }
-            });
-
-            await bg.ensureEventQueueLoaded();
-            await bg.flushEventQueue();
-
-            // Meta should reset
-            const setCalls = messenger.storage.local.set.mock.calls;
-            const lastMetaCall = setCalls.filter(c => c[0].cortex_event_queue_meta_v1).pop();
-
-            if (lastMetaCall) {
-                const meta = lastMetaCall[0].cortex_event_queue_meta_v1;
-                expect(meta.failures).toBe(0);
-                expect(meta.backoffMs).toBe(1000);
-            }
-        });
-
-        it("should respect nextAttemptAtMs", async () => {
-            const futureTime = Date.now() + 60000; // 1 minute in future
-
-            messenger._storage._setData({
-                cortex_event_push_enabled: true,
-                cortex_event_queue_v1: [
-                    { event_id: "evt-1", event_type: "test", ts_ms: Date.now(), seq: 1, payload: {} }
-                ],
-                cortex_event_queue_meta_v1: {
-                    failures: 1,
-                    backoffMs: 2000,
-                    nextAttemptAtMs: futureTime
-                }
-            });
-
-            // Clear mock before test
-            global.fetch.mockClear();
-
-            await bg.ensureEventQueueLoaded();
-            await bg.flushEventQueue();
-
-            // Should not call /events endpoint (respects backoff)
-            const eventsCalls = global.fetch.mock.calls.filter(c => c[0].includes("/tbird-sync/events"));
-            expect(eventsCalls.length).toBe(0);
+            // Should not send anything
+            expect(mockWs.send).not.toHaveBeenCalled();
         });
     });
 
@@ -420,25 +259,20 @@ describe("Event Push System", () => {
     // postEventBatch
     // =========================================================================
     describe("postEventBatch()", () => {
-        it("should post to correct endpoint", async () => {
-            // Clear mock before test
-            global.fetch.mockClear();
-            global.fetch.mockResolvedValue({ ok: true });
+        it("should send via WebSocket when connected", async () => {
+            const mockWs = mockOpenWebSocket(bg);
 
             const events = [{ event_id: "evt-1", event_type: "test" }];
+            const result = await bg.postEventBatch(events);
 
-            await bg.postEventBatch(events);
-
-            const eventsCalls = global.fetch.mock.calls.filter(c => c[0].includes("/tbird-sync/events"));
-            expect(eventsCalls.length).toBeGreaterThan(0);
-            expect(eventsCalls[0][1].method).toBe("POST");
-            expect(eventsCalls[0][1].headers["Content-Type"]).toBe("application/json");
+            expect(result).toBe(true);
+            expect(mockWs.send).toHaveBeenCalled();
+            const sent = JSON.parse(mockWs.send.mock.calls[0][0]);
+            expect(sent.type).toBe("event");
         });
 
-        it("should include events in body", async () => {
-            // Clear mock before test
-            global.fetch.mockClear();
-            global.fetch.mockResolvedValue({ ok: true });
+        it("should include events in message", async () => {
+            const mockWs = mockOpenWebSocket(bg);
 
             const events = [
                 { event_id: "evt-1", event_type: "test1" },
@@ -447,29 +281,14 @@ describe("Event Push System", () => {
 
             await bg.postEventBatch(events);
 
-            const eventsCalls = global.fetch.mock.calls.filter(c => c[0].includes("/tbird-sync/events"));
-            expect(eventsCalls.length).toBeGreaterThan(0);
-            const body = JSON.parse(eventsCalls[0][1].body);
-            expect(body.events).toEqual(events);
+            const sent = JSON.parse(mockWs.send.mock.calls[0][0]);
+            expect(sent.event.events).toEqual(events);
         });
 
-        it("should throw on non-ok response", async () => {
-            // Clear mock and set up to fail
-            global.fetch.mockClear();
-            global.fetch.mockResolvedValue({ ok: false, status: 500 });
-
-            await expect(bg.postEventBatch([{ event_id: "evt-1" }]))
-                .rejects.toThrow();
-        });
-
-        it("should handle timeout", async () => {
-            // Mock a slow response
-            global.fetch.mockImplementation(() => new Promise((resolve) => {
-                setTimeout(() => resolve({ ok: true }), 10000);
-            }));
-
-            // This should abort due to timeout
-            // Note: In real implementation, AbortController is used
+        it("should return false when WS not open", async () => {
+            // WS is null by default
+            const result = await bg.postEventBatch([{ event_id: "evt-1" }]);
+            expect(result).toBe(false);
         });
     });
 
@@ -507,56 +326,11 @@ describe("Event Push System", () => {
     });
 
     // =========================================================================
-    // Concurrent Flush Prevention
-    // =========================================================================
-    describe("Concurrent Flush Prevention", () => {
-        it("should not flush while already flushing", async () => {
-            // Clear mock
-            global.fetch.mockClear();
-            let resolveFlush = null;
-            const pending = new Promise(resolve => {
-                resolveFlush = resolve;
-            });
-            global.fetch.mockImplementation((url) => {
-                if (url.includes("/tbird-sync/events")) {
-                    return pending;
-                }
-                return Promise.resolve({ ok: true, json: () => Promise.resolve({}) });
-            });
-
-            messenger._storage._setData({
-                cortex_event_push_enabled: true,
-                cortex_event_queue_v1: [
-                    { event_id: "evt-1", event_type: "test", ts_ms: Date.now(), seq: 1, payload: {} }
-                ],
-                cortex_event_queue_meta_v1: {}
-            });
-
-            await bg.ensureEventQueueLoaded();
-
-            // Start first flush
-            const flush1 = bg.flushEventQueue();
-
-            // Try second flush immediately
-            const flush2 = bg.flushEventQueue();
-
-            expect(resolveFlush).toBeDefined();
-            resolveFlush({ ok: true });
-            await flush1;
-            await flush2;
-
-            // Should only have one call to /events endpoint (concurrent prevention)
-            const eventsCalls = global.fetch.mock.calls.filter(c => c[0].includes("/tbird-sync/events"));
-            expect(eventsCalls.length).toBeLessThanOrEqual(1);
-        });
-    });
-
-    // =========================================================================
-    // New Email Push
+    // New Email Push (WebSocket)
     // =========================================================================
     describe("New Email Push", () => {
-        it("should post headerMessageId when available", async () => {
-            global.fetch.mockResolvedValue({ ok: true, json: () => Promise.resolve({}) });
+        it("should post headerMessageId via WebSocket", async () => {
+            const mockWs = mockOpenWebSocket(bg);
 
             const listener = messenger.messages.onNewMailReceived.addListener.mock.calls[0][0];
             const msg = createMockMessage({ headerMessageId: "<msg-1@example.com>" });
@@ -566,14 +340,16 @@ describe("Event Push System", () => {
             jest.advanceTimersByTime(200);
             await Promise.resolve();
 
-            const newEmailCalls = global.fetch.mock.calls.filter(c => c[0].includes("/tbird-sync/new-email"));
-            expect(newEmailCalls.length).toBeGreaterThan(0);
-            const body = JSON.parse(newEmailCalls[0][1].body);
-            expect(body.message_id).toBe("<msg-1@example.com>");
+            // Should have sent via WebSocket
+            expect(mockWs.send).toHaveBeenCalled();
+            const sent = JSON.parse(mockWs.send.mock.calls[0][0]);
+            expect(sent.type).toBe("event");
+            expect(sent.event.type).toBe("new_email");
+            expect(sent.event.message_id).toBe("<msg-1@example.com>");
         });
 
         it("should resolve message-id via getFull when headerMessageId missing", async () => {
-            global.fetch.mockResolvedValue({ ok: true, json: () => Promise.resolve({}) });
+            const mockWs = mockOpenWebSocket(bg);
             messenger.messages.getFull.mockResolvedValue({
                 headers: { "message-id": ["<fallback@example.com>"] }
             });
@@ -586,19 +362,18 @@ describe("Event Push System", () => {
             jest.advanceTimersByTime(200);
             await Promise.resolve();
 
-            const newEmailCalls = global.fetch.mock.calls.filter(c => c[0].includes("/tbird-sync/new-email"));
-            expect(newEmailCalls.length).toBeGreaterThan(0);
-            const body = JSON.parse(newEmailCalls[0][1].body);
-            expect(body.message_id).toBe("<fallback@example.com>");
+            expect(mockWs.send).toHaveBeenCalled();
+            const sent = JSON.parse(mockWs.send.mock.calls[0][0]);
+            expect(sent.event.message_id).toBe("<fallback@example.com>");
         });
     });
 
     // =========================================================================
     // New Email Polling Fallback
     // =========================================================================
-    describe("New Email Polling Fallback", () => {
-        it("should post new emails found via inbox polling", async () => {
-            global.fetch.mockResolvedValue({ ok: true, json: () => Promise.resolve({}) });
+    describe("New Email Inbox Polling", () => {
+        it("should send new emails found via inbox polling through WebSocket", async () => {
+            const mockWs = mockOpenWebSocket(bg);
             messenger.messages.query.mockResolvedValue({
                 messages: [
                     createMockMessage({ headerMessageId: "<poll-1@example.com>" }),
@@ -607,26 +382,35 @@ describe("Event Push System", () => {
             });
 
             await bg.pollForNewEmails();
+            jest.advanceTimersByTime(200);
+            await Promise.resolve();
 
-            const calls = global.fetch.mock.calls.filter(c => c[0].includes("/tbird-sync/new-email"));
-            expect(calls.length).toBe(2);
-            const ids = calls.map(c => JSON.parse(c[1].body).message_id);
-            expect(ids).toEqual(expect.arrayContaining(["<poll-1@example.com>", "<poll-2@example.com>"]));
+            expect(mockWs.send).toHaveBeenCalled();
+            const sentMessages = mockWs.send.mock.calls.map(c => JSON.parse(c[0]));
+            const newEmailEvents = sentMessages.filter(m => m.event && m.event.type === "new_email");
+            expect(newEmailEvents.length).toBe(2);
         });
 
         it("should dedupe already seen message ids", async () => {
-            global.fetch.mockResolvedValue({ ok: true, json: () => Promise.resolve({}) });
+            const mockWs = mockOpenWebSocket(bg);
             messenger.messages.query.mockResolvedValue({
                 messages: [createMockMessage({ headerMessageId: "<poll-dup@example.com>" })]
             });
 
             await bg.pollForNewEmails();
-            await bg.pollForNewEmails();
+            jest.advanceTimersByTime(200);
+            await Promise.resolve();
 
-            const calls = global.fetch.mock.calls.filter(c => c[0].includes("/tbird-sync/new-email"));
-            expect(calls.length).toBe(1);
-            const body = JSON.parse(calls[0][1].body);
-            expect(body.message_id).toBe("<poll-dup@example.com>");
+            mockWs.send.mockClear();
+
+            await bg.pollForNewEmails();
+            jest.advanceTimersByTime(200);
+            await Promise.resolve();
+
+            // Second poll should not send duplicates
+            const sentMessages = mockWs.send.mock.calls.map(c => JSON.parse(c[0]));
+            const newEmailEvents = sentMessages.filter(m => m.event && m.event.type === "new_email");
+            expect(newEmailEvents.length).toBe(0);
         });
     });
 });

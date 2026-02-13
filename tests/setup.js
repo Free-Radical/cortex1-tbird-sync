@@ -264,6 +264,7 @@ module.exports = {
             Set: global.Set,
             AbortController: global.AbortController,
             AbortSignal: global.AbortSignal,
+            WebSocket: { OPEN: 1, CONNECTING: 0, CLOSING: 2, CLOSED: 3 },
             CORTEX_TEST_MODE: global.CORTEX_TEST_MODE,
             // Pre-create __exports__ so it's accessible after vm.runInContext
             __exports__: {}
@@ -309,7 +310,6 @@ module.exports = {
 
                 // Command processing
                 processCommand,
-                pollForCommands,
 
                 // Event system
                 enqueueEvent,
@@ -317,6 +317,11 @@ module.exports = {
                 postEventBatch,
                 ensureEventQueueLoaded,
                 pollForNewEmails,
+
+                // WebSocket (sole IPC transport)
+                isWebSocketOpen,
+                sendWebSocketMessage,
+                _setWs: function(mockWs) { ws = mockWs; },
 
                 // Debug logger
                 DebugLogger,

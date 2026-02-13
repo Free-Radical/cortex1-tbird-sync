@@ -7,7 +7,9 @@
 
 const DEFAULT_CORTEX_SERVER = "http://localhost:5001";
 const CORTEX_SERVER_STORAGE_KEY = "cortex_server_url";
-const POLL_INTERVAL_MS = 3000;  // Poll every 3 seconds
+// HTTP polling removed — WebSocket is the sole IPC transport.
+// POLL_INTERVAL_MS retained only for completion-flush retry cadence.
+const POLL_INTERVAL_MS = 3000;
 
 // =============================================================================
 // WebSocket Connection (preferred transport)
@@ -29,7 +31,6 @@ const EVENT_BATCH_SIZE = 50;
 const EVENT_FLUSH_INTERVAL_MS = 2000;
 const EVENT_POST_TIMEOUT_MS = 5000;
 
-let isPolling = false;
 let isFlushingEvents = false;
 
 let cachedCortexServerUrl = null;
@@ -214,7 +215,7 @@ function buildDiagnosticsMeta(payload) {
         serverUrl: payload.serverUrl,
         eventPushEnabled: payload.eventPushEnabled,
         connectionState: payload.connectionState,
-        pollIntervalMs: payload.pollIntervalMs,
+        transport: payload.transport,
         debugEnabled: payload.debug.enabled,
         logCount: payload.debug.logs.length,
         failureCount: payload.recentFailures.length,
@@ -234,7 +235,7 @@ async function buildDiagnosticsPayload() {
         serverUrl: await getCortexServerUrl(),
         eventPushEnabled: await isEventPushEnabled(),
         connectionState,
-        pollIntervalMs: currentPollInterval,
+        transport: "websocket",
         debug: {
             enabled: DebugLogger.enabled,
             logs
@@ -460,31 +461,9 @@ async function postEventBatch(events) {
         return true;
     }
 
-    const baseUrl = await getCortexServerUrl();
-    const url = `${baseUrl}${EVENT_PUSH_PATH}`;
-    console.log("[HTTP] Posting event batch", { count: events.length });
-
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), EVENT_POST_TIMEOUT_MS);
-
-    try {
-        const response = await fetch(url, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ events }),
-            signal: controller.signal
-        });
-
-        if (!response.ok) {
-            const err = new Error(`HTTP ${response.status}`);
-            err.status = response.status;
-            throw err;
-        }
-
-        return true;
-    } finally {
-        clearTimeout(timeout);
-    }
+    // WS not open — caller's retry logic will handle re-attempt
+    DebugLogger.log("event", "WS not open, cannot send event batch", { count: events.length });
+    return false;
 }
 
 async function flushEventQueue() {
@@ -1148,11 +1127,6 @@ async function handleToolbarClick() {
         // best-effort
     }
 
-    try {
-        await pollForCommands();
-    } catch (error) {
-        // best-effort
-    }
 }
 
 function isAllowedRpcMethodPath(methodPath) {
@@ -1310,7 +1284,13 @@ async function cortexRpc(methodPath, args) {
             const message = await findMessageByHeaderId(headerMessageId);
             if (!message) throw new Error("Message not found");
             const full = await messenger.messages.getFull(message.id);
-            return { headerMessageId, messageId: message.id, full };
+            // Include complete message state for immediate sync during ingest
+            return {
+                headerMessageId,
+                messageId: message.id,
+                full,
+                state: buildTbState(message)
+            };
         }
         case "cortex.messages.getRawByHeaderId": {
             const headerMessageId = args[0];
@@ -1510,7 +1490,6 @@ async function* iterateFolderMessagesSince(folder, cutoffMs, pageSize = 100) {
 async function postProgressUpdate(commandId, processed, total, status, meta = null) {
     if (!commandId) return;
     try {
-        const baseUrl = await getCortexServerUrl();
         const payload = {
             command_id: commandId,
             processed,
@@ -1525,14 +1504,10 @@ async function postProgressUpdate(commandId, processed, total, status, meta = nu
             }
         }
 
-        // Never allow a progress update to hang a long-running command.
-        await fetchWithTimeout(`${baseUrl}/tbird-sync/progress`, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-                ...payload,
-            }),
-        });
+        // Send progress via WebSocket (best-effort, don't block command execution)
+        if (!sendWebSocketMessage({ type: "progress", data: payload })) {
+            DebugLogger.log("progress", "WS not open, progress update dropped", { commandId, processed, total, status });
+        }
     } catch (e) {
         DebugLogger.log("progress", "postProgressUpdate failed", { commandId, processed, total, status, error: String(e) });
     }
@@ -1932,7 +1907,7 @@ async function processCommand(cmd) {
 // WebSocket Client (preferred, with HTTP fallback)
 // =============================================================================
 
-let httpPollingEnabled = false;
+// HTTP polling removed — WebSocket only.
 
 function isWebSocketOpen() {
     return ws && ws.readyState === WebSocket.OPEN;
@@ -2002,24 +1977,7 @@ async function handleWebSocketMessage(msg) {
     console.warn("[WS] Unknown message type:", msgType);
 }
 
-function startHttpPolling() {
-    if (httpPollingEnabled) return;
-    httpPollingEnabled = true;
-    console.log("[HTTP] Starting fallback polling");
-    if (!pollLoopInFlight && !pollLoopTimer) {
-        pollLoopTimer = setTimeout(pollLoop, 0);
-    }
-}
-
-function stopHttpPolling() {
-    if (!httpPollingEnabled) return;
-    httpPollingEnabled = false;
-    if (pollLoopTimer) {
-        clearTimeout(pollLoopTimer);
-        pollLoopTimer = null;
-    }
-    console.log("[HTTP] Stopped polling");
-}
+// startHttpPolling / stopHttpPolling removed — WebSocket is the sole transport.
 
 function scheduleReconnect() {
     if (wsReconnectTimer) return;
@@ -2034,7 +1992,6 @@ function scheduleReconnect() {
         connectWebSocket();
     }, delay);
 
-    startHttpPolling();
     connectionState = "RECONNECTING";
 }
 
@@ -2050,8 +2007,10 @@ async function connectWebSocket() {
         ws.onopen = () => {
             console.log("[WS] Connected to cortex-server");
             wsReconnectAttempts = 0;
-            stopHttpPolling();
             connectionState = "CONNECTED";
+            // Flush any queued completions/events that accumulated while disconnected
+            scheduleCompletionFlush(0);
+            scheduleFlushQueue();
         };
 
         ws.onmessage = async (event) => {
@@ -2084,18 +2043,6 @@ async function connectWebSocket() {
 
 // Connection state tracking (best-effort UX/diagnostics)
 let connectionState = "DISCONNECTED"; // CONNECTED, DISCONNECTED, RECONNECTING
-let consecutiveFailures = 0;
-const MAX_FAILURES_BEFORE_BACKOFF = 3;
-
-// Poll interval with exponential backoff on repeated failures
-let currentPollInterval = POLL_INTERVAL_MS;  // Starts at 3000ms
-
-// Watchdog: updated at the START of each poll cycle
-let lastPollTime = Date.now();
-
-// Track the loop so we can avoid overlaps and ensure it never dies silently
-let pollLoopTimer = null;
-let pollLoopInFlight = false;
 
 // Command execution is decoupled from polling so long-running commands cannot
 // block the next /pending poll. This keeps `last_poll_ago` low even during
@@ -2117,19 +2064,7 @@ const completionQueue = []; // results pending POST to /tbird-sync/complete
 let completionFlushInFlight = false;
 let completionFlushTimer = null;
 
-/**
- * Fetch wrapper with a hard timeout using AbortController.
- * Prevents hung network calls from keeping isPolling=true forever.
- */
-async function fetchWithTimeout(url, options, timeoutMs = 10000) {
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), timeoutMs);
-    try {
-        return await fetch(url, { ...options, signal: controller.signal });
-    } finally {
-        clearTimeout(timeout);
-    }
-}
+// fetchWithTimeout removed — all IPC goes through WebSocket.
 
 function getCommandTimeoutMs(cmd) {
     const action = cmd && cmd.action ? String(cmd.action) : "";
@@ -2309,162 +2244,43 @@ async function flushCompletions() {
     completionFlushInFlight = true;
 
     try {
-        if (isWebSocketOpen()) {
-            while (completionQueue.length > 0) {
-                const batch = completionQueue.slice(0, 25);
-                const sent = sendWebSocketMessage({
-                    type: "results",
-                    results: batch,
-                    data: batch
-                });
-                if (!sent) break;
-
-                console.log("[WS] Sent completion batch", { count: batch.length, remaining: completionQueue.length - batch.length });
-                completionQueue.splice(0, batch.length);
-                for (const r of batch) {
-                    const id = r && r.id != null ? String(r.id) : null;
-                    if (id) knownCommandIds.delete(id);
-                }
-
-                DebugLogger.log("complete", "Posted results via WS", { sent: batch.length, remaining: completionQueue.length });
-            }
+        if (!isWebSocketOpen()) {
+            // WS not connected — keep items queued, retry when WS reconnects
+            DebugLogger.log("complete", "WS not open, deferring completions", { queued: completionQueue.length });
+            scheduleCompletionFlush(POLL_INTERVAL_MS);
+            return;
         }
 
-        if (completionQueue.length === 0) return;
-
-        const baseUrl = await getCortexServerUrl();
-
-        // Post in small batches so a single large payload can't wedge completion.
         while (completionQueue.length > 0) {
             const batch = completionQueue.slice(0, 25);
-            console.log("[HTTP] Posting completion batch", { count: batch.length, remaining: completionQueue.length });
-            const response = await fetchWithTimeout(`${baseUrl}/tbird-sync/complete`, {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ results: batch })
+            const sent = sendWebSocketMessage({
+                type: "results",
+                results: batch,
+                data: batch
             });
-
-            if (!response.ok) {
-                DebugLogger.log("complete", `Complete failed: HTTP ${response.status}`, { queued: completionQueue.length });
-                markPollFailure(`complete HTTP ${response.status}`);
-                scheduleCompletionFlush(Math.min(currentPollInterval, 60000));
+            if (!sent) {
+                DebugLogger.log("complete", "WS send failed, deferring", { queued: completionQueue.length });
+                scheduleCompletionFlush(POLL_INTERVAL_MS);
                 return;
             }
 
+            console.log("[WS] Sent completion batch", { count: batch.length, remaining: completionQueue.length - batch.length });
             completionQueue.splice(0, batch.length);
             for (const r of batch) {
                 const id = r && r.id != null ? String(r.id) : null;
                 if (id) knownCommandIds.delete(id);
             }
 
-            DebugLogger.log("complete", `Posted ${batch.length} result(s)`, { remaining: completionQueue.length });
+            DebugLogger.log("complete", "Posted results via WS", { sent: batch.length, remaining: completionQueue.length });
         }
-    } catch (error) {
-        DebugLogger.log("complete", `Complete post error: ${error.message || error}`, { queued: completionQueue.length });
-        markPollFailure(`complete post: ${error.message || error}`);
-        scheduleCompletionFlush(Math.min(currentPollInterval, 60000));
     } finally {
         completionFlushInFlight = false;
     }
 }
 
-function markPollSuccess() {
-    consecutiveFailures = 0;
-    currentPollInterval = POLL_INTERVAL_MS;
-    connectionState = "CONNECTED";
-}
+// markPollSuccess / markPollFailure removed — WebSocket handles connection state.
 
-function markPollFailure(reason) {
-    consecutiveFailures += 1;
-    if (consecutiveFailures === 1) {
-        connectionState = "DISCONNECTED";
-    }
-
-    // Exponential backoff after N consecutive failures (max 60s)
-    if (consecutiveFailures >= MAX_FAILURES_BEFORE_BACKOFF) {
-        currentPollInterval = Math.min(currentPollInterval * 2, 60000);
-        connectionState = "RECONNECTING";
-        DebugLogger.log("backoff", `Backing off to ${currentPollInterval}ms`, { consecutiveFailures, reason });
-    }
-}
-
-/**
- * Poll cortex_server for pending commands
- */
-async function pollForCommands() {
-    console.log("[cortex1-tbird-sync] pollForCommands() called, isPolling:", isPolling);
-    if (isPolling) {
-        console.log("[cortex1-tbird-sync] pollForCommands() skipped - already polling");
-        return;
-    }
-    isPolling = true;
-
-    try {
-        // -----------------------------------------------------------------------------
-        // Polling safety: mark activity at the start of each poll cycle so the watchdog
-        // can detect stalls (e.g. hung network requests) and force recovery.
-        // -----------------------------------------------------------------------------
-        lastPollTime = Date.now();
-
-        const baseUrl = await getCortexServerUrl();
-        console.log("[cortex1-tbird-sync] pollForCommands() fetching:", `${baseUrl}/tbird-sync/pending`);
-        const response = await fetchWithTimeout(`${baseUrl}/tbird-sync/pending`, {
-            method: "GET",
-            headers: { "Accept": "application/json" }
-        });
-        console.log("[cortex1-tbird-sync] pollForCommands() response.ok:", response.ok, "status:", response.status);
-
-        if (!response.ok) {
-            DebugLogger.log("poll", `Poll failed: HTTP ${response.status}`);
-            markPollFailure(`HTTP ${response.status}`);
-            return;
-        }
-
-        const data = await response.json();
-        const commands = data.commands || [];
-
-        // -----------------------------------------------------------------------------
-        // Non-blocking: enqueue commands and return immediately. Command execution and
-        // /complete posting happen in workers, keeping polling responsive.
-        // -----------------------------------------------------------------------------
-        const enqueued = enqueueCommands(commands);
-        if (IS_TEST_MODE && enqueued > 0) {
-            await runWorkerLoop("fast");
-            await runWorkerLoop("slow");
-        }
-        if (commands.length > 0) {
-            DebugLogger.log("poll", `Found ${commands.length} commands`, { actions: commands.map(c => c.action), enqueued });
-        }
-
-        markPollSuccess();
-        DebugLogger.log("heartbeat", "Poll alive", {
-            // Kept for compatibility with earlier heartbeat format.
-            commandsProcessed: 0,
-            commandsReceived: commands.length,
-            commandsEnqueued: enqueued,
-            fastQueue: fastCommandQueue.length,
-            slowQueue: slowCommandQueue.length,
-            inFlight: inFlightCommands.size,
-            pendingCompletions: completionQueue.length,
-            connectionState,
-            pollIntervalMs: currentPollInterval
-        });
-
-    } catch (error) {
-        const msg = (error && error.name === "AbortError")
-            ? "Poll error: fetch timeout (10s)"
-            : `Poll error: ${error.message || error}`;
-        DebugLogger.log("poll", msg);
-        markPollFailure(msg);
-    } finally {
-        // -----------------------------------------------------------------------------
-        // Polling safety: update again on exit so the watchdog measures "time since the
-        // last poll finished", avoiding false positives when backoff gets large.
-        // -----------------------------------------------------------------------------
-        lastPollTime = Date.now();
-        isPolling = false;
-    }
-}
+// pollForCommands removed — commands arrive exclusively via WebSocket.
 
 if (!IS_TEST_MODE) {
     initEventPush().catch(() => {});
@@ -2497,67 +2313,15 @@ safeAddListener(commandEvent, (command) => {
     return undefined;
 });
 
-// Watchdog timer: detects dead polling and forcibly resets the lock.
-setInterval(() => {
-    if (!httpPollingEnabled) return;
-    const silentMs = Date.now() - lastPollTime;
-    if (silentMs > 60000) {  // No poll started for 60s
-        DebugLogger.log("watchdog", `Polling stalled for ${silentMs}ms, forcing isPolling=false`, {
-            silentMs,
-            isPolling,
-            connectionState,
-            pollIntervalMs: currentPollInterval
-        });
-        isPolling = false;  // Force reset of the polling lock
-
-        // Ensure the scheduling loop is still alive (non-fatal safety net)
-        if (!pollLoopInFlight && !pollLoopTimer) {
-            pollLoopTimer = setTimeout(pollLoop, 0);
-        }
-    }
-}, 30000);
-
-// Dynamic polling loop so backoff can change the delay between polls.
-async function pollLoop() {
-    console.log("[cortex1-tbird-sync] pollLoop() called, inFlight:", pollLoopInFlight);
-    if (!httpPollingEnabled) {
-        console.log("[HTTP] pollLoop() skipped - HTTP polling disabled");
-        return;
-    }
-    if (pollLoopInFlight) {
-        console.log("[cortex1-tbird-sync] pollLoop() skipped - already in flight");
-        return; // Prevent overlaps if called from multiple places
-    }
-    pollLoopInFlight = true;
-    pollLoopTimer = null;
-
-    try {
-        console.log("[cortex1-tbird-sync] pollLoop() calling pollForCommands()...");
-        await pollForCommands();
-        console.log("[cortex1-tbird-sync] pollLoop() pollForCommands() completed");
-    } catch (error) {
-        // pollForCommands is best-effort and already logs, but never let the loop die.
-        console.error("[cortex1-tbird-sync] pollLoop() error:", error);
-        DebugLogger.log("poll", `pollLoop error: ${error.message || error}`);
-        markPollFailure(error && error.message ? error.message : String(error));
-    } finally {
-        pollLoopInFlight = false;
-        if (httpPollingEnabled) {
-            console.log("[cortex1-tbird-sync] pollLoop() scheduling next poll in", currentPollInterval, "ms");
-            pollLoopTimer = setTimeout(pollLoop, currentPollInterval);
-        } else {
-            console.log("[HTTP] pollLoop() stopped - HTTP polling disabled");
-        }
-    }
-}
+// HTTP polling watchdog and pollLoop removed — WebSocket is the sole transport.
 
 console.log("[cortex1-tbird-sync] background.js loaded, IS_TEST_MODE:", IS_TEST_MODE);
 if (!IS_TEST_MODE) {
-    // Try WebSocket first; HTTP polling starts automatically if WS fails.
-    console.log("[cortex1-tbird-sync] Starting WebSocket...");
+    // WebSocket is the sole IPC transport to cortex-server.
+    console.log("[cortex1-tbird-sync] Connecting via WebSocket...");
     connectWebSocket();
 } else {
-    console.log("[cortex1-tbird-sync] TEST MODE - pollLoop() not started");
+    console.log("[cortex1-tbird-sync] TEST MODE - WebSocket not started");
 }
 
 // =============================================================================
@@ -2599,37 +2363,26 @@ async function resolveNewEmailMessageId(msg) {
 }
 
 async function flushNewEmailBatch() {
+    if (!isWebSocketOpen()) {
+        // WS not open — keep items in newEmailBatch, retry when WS reconnects
+        DebugLogger.log("new-email", "WS not open, deferring new-email batch", { queued: newEmailBatch.length });
+        return;
+    }
+
     const batch = newEmailBatch.splice(0);
     if (!batch.length) return;
 
-    let startIndex = 0;
-    if (isWebSocketOpen()) {
-        for (; startIndex < batch.length; startIndex += 1) {
-            const payload = batch[startIndex];
-            const event = { type: "new_email", ...payload };
-            const sent = sendWebSocketMessage({ type: "event", event, data: event });
-            if (!sent) break;
-            DebugLogger.log("new-email", "Posted new email via WS", { message_id: payload.message_id });
+    for (const payload of batch) {
+        const event = { type: "new_email", ...payload };
+        const sent = sendWebSocketMessage({ type: "event", event, data: event });
+        if (!sent) {
+            // Put unsent items back at the front
+            newEmailBatch.unshift(...batch.slice(batch.indexOf(payload)));
+            DebugLogger.log("new-email", "WS send failed mid-batch, re-queued", { queued: newEmailBatch.length });
+            return;
         }
+        DebugLogger.log("new-email", "Posted new email via WS", { message_id: payload.message_id });
     }
-
-    if (startIndex >= batch.length) return;
-
-    const baseUrl = await getCortexServerUrl();
-    const remaining = batch.slice(startIndex);
-    await Promise.all(remaining.map(async (payload) => {
-        try {
-            const response = await fetchWithTimeout(`${baseUrl}/tbird-sync/new-email`, {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify(payload)
-            });
-            if (!response.ok) throw new Error(`HTTP ${response.status}`);
-            DebugLogger.log("new-email", "Posted new email", { message_id: payload.message_id });
-        } catch (error) {
-            DebugLogger.log("new-email", "Post failed", { message_id: payload.message_id, error: String(error) });
-        }
-    }));
 }
 
 async function queueNewEmail(payload) {
@@ -2742,8 +2495,8 @@ if (!IS_TEST_MODE) {
 }
 
 // Log startup
-DebugLogger.log("startup", `Cortex1 Thunderbird Sync v${getExtensionVersion()} loaded`, { pollIntervalMs: POLL_INTERVAL_MS });
+DebugLogger.log("startup", `Cortex1 Thunderbird Sync v${getExtensionVersion()} loaded`, { transport: "websocket" });
 
 console.log(
-    `Cortex1 Thunderbird Sync v${getExtensionVersion()} loaded - polling every ${(POLL_INTERVAL_MS/1000)}s`
+    `Cortex1 Thunderbird Sync v${getExtensionVersion()} loaded - WebSocket IPC`
 );
