@@ -430,6 +430,77 @@ describe("RPC Method Execution", () => {
     });
 
     // =========================================================================
+    // messages.query compatibility behavior
+    // =========================================================================
+    describe("messages.query compatibility", () => {
+        it("should resolve /INBOX case and apply fromDate via folder scan", async () => {
+            messenger.folders.query.mockResolvedValue([
+                { path: "/Inbox", name: "Inbox" } // accountId intentionally omitted
+            ]);
+            const oldMsg = createMockMessage({
+                id: 1,
+                date: new Date("2025-01-01T00:00:00.000Z"),
+                folder: { accountId: "account1", path: "/Inbox" }
+            });
+            const newMsg = createMockMessage({
+                id: 2,
+                date: new Date("2026-02-10T12:00:00.000Z"),
+                folder: { accountId: "account1", path: "/Inbox" }
+            });
+            messenger.messages.list.mockResolvedValue({ messages: [oldMsg, newMsg], id: null });
+
+            const result = await bg.executeRpcCommand({
+                method: "messages.query",
+                args: [{
+                    accountId: "account1",
+                    folder: { accountId: "account1", path: "/INBOX" },
+                    fromDate: "2026-02-01T00:00:00.000Z",
+                    limit: 50
+                }]
+            });
+
+            expect(result.success).toBe(true);
+            expect(messenger.messages.query).not.toHaveBeenCalled();
+            expect(messenger.messages.list).toHaveBeenCalled();
+            expect(result.result.messages).toHaveLength(1);
+            expect(result.result.messages[0].id).toBe(2);
+            expect(messenger.messages.list.mock.calls[0][0].path).toBe("/Inbox");
+        });
+
+        it("should accept unreadOnly/limit/includeBody without native query type errors", async () => {
+            messenger.folders.query.mockResolvedValue([createMockFolder({ path: "/INBOX" })]);
+            const unreadMsg = createMockMessage({
+                id: 10,
+                read: false,
+                folder: { accountId: "account1", path: "/INBOX" }
+            });
+            const readMsg = createMockMessage({
+                id: 11,
+                read: true,
+                folder: { accountId: "account1", path: "/INBOX" }
+            });
+            messenger.messages.list.mockResolvedValue({ messages: [readMsg, unreadMsg], id: null });
+
+            const result = await bg.executeRpcCommand({
+                method: "messages.query",
+                args: [{
+                    accountId: "account1",
+                    folder: { accountId: "account1", path: "/INBOX" },
+                    unreadOnly: true,
+                    includeBody: false,
+                    limit: 1
+                }]
+            });
+
+            expect(result.success).toBe(true);
+            expect(messenger.messages.query).not.toHaveBeenCalled();
+            expect(messenger.messages.list).toHaveBeenCalled();
+            expect(result.result.messages).toHaveLength(1);
+            expect(result.result.messages[0].id).toBe(10);
+        });
+    });
+
+    // =========================================================================
     // sanitizeRpcResult
     // =========================================================================
     describe("sanitizeRpcResult()", () => {

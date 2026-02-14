@@ -928,16 +928,30 @@ async function moveMessages(messageIds, folderPath) {
 async function findFolder(accountId, folderPath) {
     try {
         const folders = await messenger.folders.query({ accountId });
+        const accountIdStr = accountId != null ? String(accountId) : "";
+        const targetPath = typeof folderPath === "string" ? folderPath : "";
+        const normalizedTarget = targetPath.toLowerCase();
+        const normalizedTargetNoSlash = normalizedTarget.startsWith("/") ? normalizedTarget.slice(1) : normalizedTarget;
         // Try exact match first
         for (const folder of folders) {
+            const folderAccountId = folder && folder.accountId != null ? String(folder.accountId) : "";
+            if (accountIdStr && folderAccountId && folderAccountId !== accountIdStr) continue;
             if (folder.path === folderPath || folder.name === folderPath) {
                 return folder;
             }
         }
         // Try case-insensitive match
-        const lowerPath = folderPath.toLowerCase();
         for (const folder of folders) {
-            if (folder.path.toLowerCase() === lowerPath || folder.name.toLowerCase() === lowerPath) {
+            const folderAccountId = folder && folder.accountId != null ? String(folder.accountId) : "";
+            if (accountIdStr && folderAccountId && folderAccountId !== accountIdStr) continue;
+            const folderPathLower = String(folder.path || "").toLowerCase();
+            const folderNameLower = String(folder.name || "").toLowerCase();
+            if (
+                folderPathLower === normalizedTarget ||
+                folderNameLower === normalizedTarget ||
+                folderPathLower === normalizedTargetNoSlash ||
+                folderNameLower === normalizedTargetNoSlash
+            ) {
                 return folder;
             }
         }
@@ -946,6 +960,174 @@ async function findFolder(accountId, folderPath) {
         console.error("Error finding folder:", error);
         return null;
     }
+}
+
+function parseAccountFolderId(value) {
+    if (typeof value !== "string") return null;
+    const raw = value.trim();
+    if (!raw) return null;
+    const idx = raw.indexOf("://");
+    if (idx <= 0) return null;
+    const accountId = raw.slice(0, idx);
+    let folderPath = raw.slice(idx + 3);
+    if (!folderPath.startsWith("/")) folderPath = `/${folderPath}`;
+    return { accountId, folderPath };
+}
+
+function normalizeFolderPath(path) {
+    if (typeof path !== "string") return "";
+    const trimmed = path.trim().replace(/\\/g, "/");
+    if (!trimmed) return "";
+    return trimmed.startsWith("/") ? trimmed : `/${trimmed}`;
+}
+
+async function resolveRpcFolder(folderRef, accountIdHint = "") {
+    let accountId = accountIdHint ? String(accountIdHint) : "";
+    let folderPath = "";
+
+    if (typeof folderRef === "string") {
+        const parsed = parseAccountFolderId(folderRef);
+        if (parsed) {
+            accountId = parsed.accountId;
+            folderPath = parsed.folderPath;
+        } else {
+            folderPath = normalizeFolderPath(folderRef);
+        }
+    } else if (folderRef && typeof folderRef === "object") {
+        const parsed = parseAccountFolderId(folderRef.id);
+        if (parsed && !accountId) {
+            accountId = parsed.accountId;
+        }
+        if (parsed && !folderPath) {
+            folderPath = parsed.folderPath;
+        }
+        if (!accountId && folderRef.accountId != null) {
+            accountId = String(folderRef.accountId);
+        }
+        if (!folderPath && typeof folderRef.path === "string") {
+            folderPath = normalizeFolderPath(folderRef.path);
+        }
+        if (!folderPath && typeof folderRef.name === "string") {
+            folderPath = normalizeFolderPath(folderRef.name);
+        }
+    }
+
+    if (!folderPath) folderPath = "/INBOX";
+    if (!accountId) return null;
+
+    const resolved = await findFolder(accountId, folderPath);
+    if (resolved) return resolved;
+
+    const normalized = normalizeFolderPath(folderPath);
+    if (normalized === "/INBOX") {
+        return await findFolder(accountId, "/Inbox");
+    }
+    if (normalized === "/Inbox") {
+        return await findFolder(accountId, "/INBOX");
+    }
+    return null;
+}
+
+function filterMessagesByScope(messages, expectedAccountId = "", expectedFolderPath = "") {
+    if (!Array.isArray(messages)) return [];
+    const accountId = expectedAccountId ? String(expectedAccountId) : "";
+    const folderPath = normalizeFolderPath(expectedFolderPath).toLowerCase();
+
+    return messages.filter((msg) => {
+        if (!msg || typeof msg !== "object") return false;
+        const folder = msg.folder;
+        if (!folder || typeof folder !== "object") return false;
+
+        if (accountId && String(folder.accountId || "") !== accountId) {
+            return false;
+        }
+
+        if (!folderPath) return true;
+        const msgPath = normalizeFolderPath(folder.path || "").toLowerCase();
+        return msgPath === folderPath;
+    });
+}
+
+function parseRpcDateMs(value) {
+    if (value == null) return null;
+    if (typeof value === "number" && Number.isFinite(value)) return value;
+    if (value instanceof Date) {
+        const ms = value.getTime();
+        return Number.isFinite(ms) ? ms : null;
+    }
+    if (typeof value === "string" && value.trim()) {
+        const parsed = Date.parse(value);
+        return Number.isFinite(parsed) ? parsed : null;
+    }
+    return null;
+}
+
+function toPositiveInt(value, fallback, max = 2000) {
+    const n = Number(value);
+    if (!Number.isFinite(n) || n <= 0) return fallback;
+    return Math.min(Math.floor(n), max);
+}
+
+function matchesQueryFilters(message, { fromDateMs = null, unreadFilter = null } = {}) {
+    if (!message || typeof message !== "object") return false;
+    if (typeof unreadFilter === "boolean") {
+        const isUnread = !Boolean(message.read);
+        if (isUnread !== unreadFilter) return false;
+    }
+    if (typeof fromDateMs === "number" && Number.isFinite(fromDateMs)) {
+        const msgMs = getMessageDateMs(message);
+        if (msgMs === null || msgMs < fromDateMs) return false;
+    }
+    return true;
+}
+
+async function queryFolderMessagesCompat(folder, queryInfo) {
+    const requestedLimit = toPositiveInt(queryInfo && queryInfo.limit, 100, 5000);
+    const limit = Math.max(1, requestedLimit);
+    const unreadFilter = (queryInfo && queryInfo.unreadOnly === true)
+        ? true
+        : ((queryInfo && typeof queryInfo.unread === "boolean") ? queryInfo.unread : null);
+    const fromDateMs = parseRpcDateMs(queryInfo && queryInfo.fromDate);
+
+    // Keep this within the outer command timeout budget.
+    const deadlineMs = Date.now() + 24000;
+    const maxPages = fromDateMs !== null ? 60 : Math.max(6, Math.ceil(limit / 100) + 2);
+    const pageSize = Math.max(50, Math.min(500, Math.max(limit, 100)));
+    const seen = new Set();
+    const collected = [];
+
+    let page = await listFolderMessagesFirstPage(folder, pageSize);
+    let pages = 0;
+    while (page && pages < maxPages && Date.now() < deadlineMs) {
+        pages += 1;
+        const pageMessages = Array.isArray(page.messages) ? page.messages : [];
+        for (const msg of pageMessages) {
+            if (!matchesQueryFilters(msg, { fromDateMs, unreadFilter })) continue;
+            const key = String(
+                msg.id != null
+                    ? msg.id
+                    : (msg.headerMessageId || `${msg.subject || ""}|${msg.date || ""}|${Math.random()}`)
+            );
+            if (seen.has(key)) continue;
+            seen.add(key);
+            collected.push(msg);
+        }
+
+        if (!page.id) break;
+        if (fromDateMs === null && collected.length >= limit) break;
+        page = await messenger.messages.continueList(page.id);
+    }
+
+    collected.sort((a, b) => {
+        const aMs = getMessageDateMs(a) || 0;
+        const bMs = getMessageDateMs(b) || 0;
+        return bMs - aMs;
+    });
+
+    return {
+        id: null,
+        messages: collected.slice(0, limit),
+    };
 }
 
 /**
@@ -1316,6 +1498,89 @@ async function executeRpcCommand(cmd) {
         let result;
         if (method.startsWith("cortex.")) {
             result = await cortexRpc(method, args);
+        } else if (method === "messages.query") {
+            const original = (args[0] && typeof args[0] === "object") ? args[0] : {};
+            const queryInfo = { ...original };
+
+            let accountIdHint = queryInfo.accountId != null ? String(queryInfo.accountId) : "";
+            let expectedFolderPath = "";
+            let resolvedFolder = null;
+
+            if (Object.prototype.hasOwnProperty.call(queryInfo, "folder")) {
+                resolvedFolder = await resolveRpcFolder(queryInfo.folder, accountIdHint);
+            } else if (Object.prototype.hasOwnProperty.call(queryInfo, "folderId")) {
+                resolvedFolder = await resolveRpcFolder(queryInfo.folderId, accountIdHint);
+            } else if (accountIdHint) {
+                resolvedFolder = await resolveRpcFolder({ accountId: accountIdHint, path: "/INBOX" }, accountIdHint);
+            }
+
+            if (resolvedFolder) {
+                queryInfo.folder = resolvedFolder;
+                accountIdHint = String(resolvedFolder.accountId || accountIdHint || "");
+                expectedFolderPath = normalizeFolderPath(resolvedFolder.path || "");
+            }
+            if (!expectedFolderPath && queryInfo.folder && typeof queryInfo.folder === "object") {
+                expectedFolderPath = normalizeFolderPath(queryInfo.folder.path || "");
+            }
+            if (!accountIdHint && queryInfo.folder && typeof queryInfo.folder === "object" && queryInfo.folder.accountId != null) {
+                accountIdHint = String(queryInfo.folder.accountId);
+            }
+            delete queryInfo.folderId;
+            delete queryInfo.accountId;
+
+            const fromDateMs = parseRpcDateMs(queryInfo.fromDate);
+            if (fromDateMs !== null) {
+                queryInfo.fromDate = new Date(fromDateMs);
+            }
+            if (queryInfo.unreadOnly === true && typeof queryInfo.unread !== "boolean") {
+                queryInfo.unread = true;
+            }
+
+            const nativeQuery = { ...queryInfo };
+            delete nativeQuery.includeBody;
+            delete nativeQuery.limit;
+            delete nativeQuery.unreadOnly;
+
+            const shouldUseCompatFolderQuery = Boolean(queryInfo.folder) && (
+                fromDateMs !== null ||
+                Object.prototype.hasOwnProperty.call(original, "limit") ||
+                Object.prototype.hasOwnProperty.call(original, "unreadOnly")
+            );
+
+            if (shouldUseCompatFolderQuery) {
+                result = await queryFolderMessagesCompat(queryInfo.folder, queryInfo);
+            } else {
+                result = await messenger.messages.query(nativeQuery);
+                if (
+                    result &&
+                    Array.isArray(result.messages) &&
+                    Object.prototype.hasOwnProperty.call(original, "limit")
+                ) {
+                    const capped = toPositiveInt(original.limit, result.messages.length, 5000);
+                    result = {
+                        ...result,
+                        messages: result.messages.slice(0, capped),
+                    };
+                }
+            }
+
+            if (result && Array.isArray(result.messages) && (accountIdHint || expectedFolderPath)) {
+                result = {
+                    ...result,
+                    messages: filterMessagesByScope(result.messages, accountIdHint, expectedFolderPath),
+                };
+            }
+        } else if (method === "folders.query") {
+            const queryInfo = (args[0] && typeof args[0] === "object") ? args[0] : {};
+            const accountId = queryInfo.accountId != null ? String(queryInfo.accountId) : "";
+            result = await messenger.folders.query(queryInfo);
+            if (Array.isArray(result) && accountId) {
+                result = result.filter((folder) => {
+                    if (!folder || typeof folder !== "object") return false;
+                    const folderAccountId = folder.accountId != null ? String(folder.accountId) : "";
+                    return !folderAccountId || folderAccountId === accountId;
+                });
+            }
         } else {
             const fn = getRpcFunctionByPath(method);
             if (!fn) {
