@@ -310,6 +310,8 @@ module.exports = {
 
                 // Command processing
                 processCommand,
+                enqueueCommands,
+                runWorkerLoop,
 
                 // Event system
                 enqueueEvent,
@@ -334,6 +336,19 @@ module.exports = {
 
                 // Backfill
                 handleBackfillRepliedForwarded,
+
+                // Cancel
+                cancelledJobIds,
+                pruneCancelledJobIds,
+                removeQueuedCommandsForJob,
+                CANCEL_TTL_MS,
+                CANCEL_MAX_SIZE,
+
+                // Queues (test access)
+                highCommandQueue,
+                fastCommandQueue,
+                slowCommandQueue,
+                knownCommandIds,
 
                 // Constants
                 DEFAULT_CORTEX_SERVER,
