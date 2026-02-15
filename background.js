@@ -927,39 +927,129 @@ async function moveMessages(messageIds, folderPath) {
  */
 async function findFolder(accountId, folderPath) {
     try {
-        const folders = await messenger.folders.query({ accountId });
         const accountIdStr = accountId != null ? String(accountId) : "";
         const targetPath = typeof folderPath === "string" ? folderPath : "";
         const normalizedTarget = targetPath.toLowerCase();
         const normalizedTargetNoSlash = normalizedTarget.startsWith("/") ? normalizedTarget.slice(1) : normalizedTarget;
-        // Try exact match first
-        for (const folder of folders) {
-            const folderAccountId = folder && folder.accountId != null ? String(folder.accountId) : "";
-            if (accountIdStr && folderAccountId && folderAccountId !== accountIdStr) continue;
-            if (folder.path === folderPath || folder.name === folderPath) {
-                return folder;
+
+        const findInScopedFolders = (folders) => {
+            const scopedFolders = [];
+            for (const folder of Array.isArray(folders) ? folders : []) {
+                if (!folder || typeof folder !== "object") continue;
+                const folderAccountId = folder.accountId != null ? String(folder.accountId) : "";
+                // Strict scoping: never accept ambiguous/missing account IDs for account-bound lookups.
+                if (accountIdStr && folderAccountId !== accountIdStr) continue;
+                scopedFolders.push(folder);
             }
-        }
-        // Try case-insensitive match
-        for (const folder of folders) {
-            const folderAccountId = folder && folder.accountId != null ? String(folder.accountId) : "";
-            if (accountIdStr && folderAccountId && folderAccountId !== accountIdStr) continue;
-            const folderPathLower = String(folder.path || "").toLowerCase();
-            const folderNameLower = String(folder.name || "").toLowerCase();
-            if (
-                folderPathLower === normalizedTarget ||
-                folderNameLower === normalizedTarget ||
-                folderPathLower === normalizedTargetNoSlash ||
-                folderNameLower === normalizedTargetNoSlash
-            ) {
-                return folder;
+
+            // Try exact match first
+            for (const folder of scopedFolders) {
+                if (folder.path === folderPath || folder.name === folderPath) {
+                    return folder;
+                }
             }
-        }
+            // Try case-insensitive match
+            for (const folder of scopedFolders) {
+                const folderPathLower = String(folder.path || "").toLowerCase();
+                const folderNameLower = String(folder.name || "").toLowerCase();
+                if (
+                    folderPathLower === normalizedTarget ||
+                    folderNameLower === normalizedTarget ||
+                    folderPathLower === normalizedTargetNoSlash ||
+                    folderNameLower === normalizedTargetNoSlash
+                ) {
+                    return folder;
+                }
+            }
+            return null;
+        };
+
+        const foldersFromAccountTree = await getAccountFolders(accountIdStr);
+        const accountTreeMatch = findInScopedFolders(foldersFromAccountTree);
+        if (accountTreeMatch) return accountTreeMatch;
+
+        // Fallback to API query if account tree did not contain the target folder.
+        const fallbackFolders = await messenger.folders.query({ accountId });
+        const fallbackMatch = findInScopedFolders(fallbackFolders);
+        if (fallbackMatch) return fallbackMatch;
+
         return null;
     } catch (error) {
         console.error("Error finding folder:", error);
         return null;
     }
+}
+
+function flattenAccountFolders(folder, out, accountIdHint) {
+    if (!folder || typeof folder !== "object") return;
+    const normalized = { ...folder };
+    if (normalized.accountId == null || normalized.accountId === "") {
+        normalized.accountId = accountIdHint;
+    }
+    out.push(normalized);
+    const subs = Array.isArray(folder.subFolders) ? folder.subFolders : [];
+    for (const sub of subs) {
+        flattenAccountFolders(sub, out, accountIdHint);
+    }
+}
+
+async function getAccountFolders(accountId) {
+    const accountIdStr = accountId != null ? String(accountId) : "";
+    if (!accountIdStr) return [];
+    try {
+        const accounts = await messenger.accounts.list();
+        const account = (accounts || []).find((acc) => acc && String(acc.id || "") === accountIdStr);
+        if (!account) return [];
+        const out = [];
+        const roots = Array.isArray(account.folders) ? account.folders : [];
+        for (const root of roots) {
+            flattenAccountFolders(root, out, accountIdStr);
+        }
+        return out;
+    } catch {
+        return [];
+    }
+}
+
+function applyFolderQueryFilters(folders, queryInfo = {}) {
+    let out = Array.isArray(folders) ? folders.slice() : [];
+    const accountId = queryInfo && queryInfo.accountId != null ? String(queryInfo.accountId) : "";
+    if (accountId) {
+        out = out.filter((folder) => folder && String(folder.accountId || "") === accountId);
+    }
+
+    const wantedSpecialUse = Array.isArray(queryInfo && queryInfo.specialUse)
+        ? queryInfo.specialUse.map((v) => String(v || "").toLowerCase()).filter(Boolean)
+        : [];
+    if (wantedSpecialUse.length > 0) {
+        out = out.filter((folder) => {
+            const have = Array.isArray(folder && folder.specialUse)
+                ? folder.specialUse.map((v) => String(v || "").toLowerCase())
+                : [];
+            return wantedSpecialUse.every((tag) => have.includes(tag));
+        });
+    }
+
+    if (queryInfo && typeof queryInfo.path === "string" && queryInfo.path.trim()) {
+        const targetPath = normalizeFolderPath(queryInfo.path).toLowerCase();
+        out = out.filter((folder) => normalizeFolderPath(folder && folder.path || "").toLowerCase() === targetPath);
+    }
+    if (queryInfo && typeof queryInfo.name === "string" && queryInfo.name.trim()) {
+        const targetName = String(queryInfo.name).toLowerCase();
+        out = out.filter((folder) => String(folder && folder.name || "").toLowerCase() === targetName);
+    }
+    if (queryInfo && typeof queryInfo.type === "string" && queryInfo.type.trim()) {
+        const targetType = String(queryInfo.type).toLowerCase();
+        out = out.filter((folder) => String(folder && folder.type || "").toLowerCase() === targetType);
+    }
+
+    if (queryInfo && typeof queryInfo.isRoot === "boolean") {
+        out = out.filter((folder) => Boolean(folder && folder.isRoot) === queryInfo.isRoot);
+    }
+    if (queryInfo && typeof queryInfo.isFavorite === "boolean") {
+        out = out.filter((folder) => Boolean(folder && folder.isFavorite) === queryInfo.isFavorite);
+    }
+    return out;
 }
 
 function parseAccountFolderId(value) {
@@ -1066,6 +1156,21 @@ function toPositiveInt(value, fallback, max = 2000) {
     const n = Number(value);
     if (!Number.isFinite(n) || n <= 0) return fallback;
     return Math.min(Math.floor(n), max);
+}
+
+function normalizeRpcArgs(rawArgs) {
+    if (Array.isArray(rawArgs)) return rawArgs;
+    if (rawArgs && typeof rawArgs === "object") return [rawArgs];
+    if (typeof rawArgs === "string" && rawArgs.trim()) {
+        try {
+            const parsed = JSON.parse(rawArgs);
+            if (Array.isArray(parsed)) return parsed;
+            if (parsed && typeof parsed === "object") return [parsed];
+        } catch {
+            // Ignore malformed JSON and fall through to empty args.
+        }
+    }
+    return [];
 }
 
 function matchesQueryFilters(message, { fromDateMs = null, unreadFilter = null } = {}) {
@@ -1338,13 +1443,17 @@ function isAllowedRpcMethodPath(methodPath) {
 function getRpcFunctionByPath(methodPath) {
     const parts = methodPath.split(".");
     let obj = messenger;
+    let parent = null;
 
     for (const part of parts) {
         if (!obj || typeof obj !== "object") return null;
+        parent = obj;
         obj = obj[part];
     }
 
-    return (typeof obj === "function") ? obj : null;
+    // Bind to parent to preserve `this` context (e.g. folders.getFolderInfo
+    // needs `this` === messenger.folders)
+    return (typeof obj === "function") ? obj.bind(parent) : null;
 }
 
 function sanitizeRpcResult(value) {
@@ -1461,6 +1570,187 @@ async function cortexRpc(methodPath, args) {
             }
             return { copied: resolved, failed, folder: minifyFolder(targetFolder) };
         }
+        case "cortex.getInboxCounts": {
+            // Returns per-account inbox message counts using live folder references.
+            // Uses getFolderInfo (fast) with fallback to messages.list pagination (slow).
+            const _timeoutPromise = (promise, ms, label) =>
+                Promise.race([
+                    promise,
+                    new Promise((_, reject) =>
+                        setTimeout(() => reject(new Error(`${label} timed out after ${ms}ms`)), ms)
+                    ),
+                ]);
+            const accounts = await messenger.accounts.list();
+            const counts = {};
+            for (const account of accounts) {
+                if (account.type === "none") continue;
+                const accountId = account.id;
+                const t0 = Date.now();
+                // Find inbox folder in the live account tree
+                let inboxFolder = null;
+                const findInbox = (folders) => {
+                    for (const f of (folders || [])) {
+                        if (Array.isArray(f.specialUse) && f.specialUse.includes("inbox")) {
+                            return f;
+                        }
+                        const sub = findInbox(f.subFolders);
+                        if (sub) return sub;
+                    }
+                    return null;
+                };
+                const rootSubs = account.rootFolder
+                    ? (account.rootFolder.subFolders || [])
+                    : (account.folders || []);
+                inboxFolder = findInbox(rootSubs);
+                if (!inboxFolder) {
+                    counts[accountId] = { name: account.name, type: account.type, totalMessageCount: null, error: "no inbox folder", ms: Date.now() - t0 };
+                    continue;
+                }
+                // Strategy 1: getFolderInfo with the live MailFolder object (fast, <1s)
+                let method = "none";
+                try {
+                    const info = await _timeoutPromise(
+                        messenger.folders.getFolderInfo(inboxFolder),
+                        10000, `getFolderInfo(${accountId})`
+                    );
+                    method = "getFolderInfo";
+                    counts[accountId] = {
+                        name: account.name,
+                        type: account.type,
+                        totalMessageCount: info.totalMessageCount,
+                        unreadMessageCount: info.unreadMessageCount,
+                        method, ms: Date.now() - t0,
+                    };
+                    continue;
+                } catch (e) {
+                    // Strategy 1 failed, try getFolderInfo with string id
+                    try {
+                        const info = await _timeoutPromise(
+                            messenger.folders.getFolderInfo(inboxFolder.id),
+                            10000, `getFolderInfo(id=${inboxFolder.id})`
+                        );
+                        method = "getFolderInfo(id)";
+                        counts[accountId] = {
+                            name: account.name,
+                            type: account.type,
+                            totalMessageCount: info.totalMessageCount,
+                            unreadMessageCount: info.unreadMessageCount,
+                            method, ms: Date.now() - t0,
+                        };
+                        continue;
+                    } catch (_e2) {
+                        // Strategy 2: messages.list pagination (slow but reliable)
+                        try {
+                            let total = 0;
+                            let unread = 0;
+                            let pages = 0;
+                            const firstPage = await _timeoutPromise(
+                                messenger.messages.list(inboxFolder),
+                                15000, `messages.list(${accountId})`
+                            );
+                            total += firstPage.messages.length;
+                            for (const m of firstPage.messages) { if (!m.read) unread++; }
+                            pages++;
+                            let listId = firstPage.id;
+                            while (listId) {
+                                const nextPage = await _timeoutPromise(
+                                    messenger.messages.continueList(listId),
+                                    10000, `messages.continueList(${accountId} p${pages})`
+                                );
+                                if (!nextPage || !nextPage.messages || nextPage.messages.length === 0) break;
+                                total += nextPage.messages.length;
+                                for (const m of nextPage.messages) { if (!m.read) unread++; }
+                                listId = nextPage.id;
+                                pages++;
+                            }
+                            method = `messages.list(${pages}pg)`;
+                            counts[accountId] = {
+                                name: account.name,
+                                type: account.type,
+                                totalMessageCount: total,
+                                unreadMessageCount: unread,
+                                method, ms: Date.now() - t0,
+                            };
+                        } catch (e3) {
+                            method = "failed";
+                            counts[accountId] = {
+                                name: account.name,
+                                type: account.type,
+                                totalMessageCount: null,
+                                error: String(e3.message || e3),
+                                method, ms: Date.now() - t0,
+                            };
+                        }
+                    }
+                }
+            }
+            return counts;
+        }
+        case "cortex.getNewestInboxMessageByAccount": {
+            // Returns per-account newest inbox message timestamp using live folder references.
+            // Uses messages.list (returns newest-first) to avoid messages.query serialization bugs.
+            const _timeoutPromise2 = (promise, ms, label) =>
+                Promise.race([
+                    promise,
+                    new Promise((_, reject) =>
+                        setTimeout(() => reject(new Error(`${label} timed out after ${ms}ms`)), ms)
+                    ),
+                ]);
+            const accounts = await messenger.accounts.list();
+            const result = {};
+            for (const account of accounts) {
+                if (account.type === "none") continue;
+                const accountId = account.id;
+                const t0 = Date.now();
+                // Find inbox folder in the live account tree
+                const findInbox = (folders) => {
+                    for (const f of (folders || [])) {
+                        if (Array.isArray(f.specialUse) && f.specialUse.includes("inbox")) return f;
+                        const sub = findInbox(f.subFolders);
+                        if (sub) return sub;
+                    }
+                    return null;
+                };
+                const rootSubs = account.rootFolder
+                    ? (account.rootFolder.subFolders || [])
+                    : (account.folders || []);
+                const inboxFolder = findInbox(rootSubs);
+                if (!inboxFolder) {
+                    result[accountId] = {
+                        name: account.name, type: account.type,
+                        newestDate: null, error: "no inbox folder", ms: Date.now() - t0,
+                    };
+                    continue;
+                }
+                try {
+                    // messages.list returns newest-first; we only need page 1
+                    const page = await _timeoutPromise2(
+                        messenger.messages.list(inboxFolder),
+                        15000, `messages.list(${accountId})`
+                    );
+                    const msgs = (page && page.messages) || [];
+                    let newestDate = null;
+                    let sampled = msgs.length;
+                    for (const m of msgs) {
+                        if (m.date) {
+                            const d = (m.date instanceof Date) ? m.date.toISOString() : String(m.date);
+                            if (!newestDate || d > newestDate) newestDate = d;
+                        }
+                    }
+                    result[accountId] = {
+                        name: account.name, type: account.type,
+                        newestDate, sampled, ms: Date.now() - t0,
+                    };
+                } catch (e) {
+                    result[accountId] = {
+                        name: account.name, type: account.type,
+                        newestDate: null, error: String(e.message || e),
+                        ms: Date.now() - t0,
+                    };
+                }
+            }
+            return result;
+        }
         case "cortex.messages.getFullByHeaderId": {
             const headerMessageId = args[0];
             const message = await findMessageByHeaderId(headerMessageId);
@@ -1488,7 +1778,7 @@ async function cortexRpc(methodPath, args) {
 
 async function executeRpcCommand(cmd) {
     const method = cmd.method;
-    const args = Array.isArray(cmd.args) ? cmd.args : [];
+    const args = normalizeRpcArgs(cmd.args);
 
     if (!isAllowedRpcMethodPath(method)) {
         return { success: false, action: "rpc", method, error: `Method not allowed: ${method}` };
@@ -1501,6 +1791,11 @@ async function executeRpcCommand(cmd) {
         } else if (method === "messages.query") {
             const original = (args[0] && typeof args[0] === "object") ? args[0] : {};
             const queryInfo = { ...original };
+            const requestedScopedQuery = Boolean(
+                queryInfo.accountId != null ||
+                Object.prototype.hasOwnProperty.call(queryInfo, "folder") ||
+                Object.prototype.hasOwnProperty.call(queryInfo, "folderId")
+            );
 
             let accountIdHint = queryInfo.accountId != null ? String(queryInfo.accountId) : "";
             let expectedFolderPath = "";
@@ -1524,6 +1819,15 @@ async function executeRpcCommand(cmd) {
             }
             if (!accountIdHint && queryInfo.folder && typeof queryInfo.folder === "object" && queryInfo.folder.accountId != null) {
                 accountIdHint = String(queryInfo.folder.accountId);
+            }
+            if (requestedScopedQuery && !resolvedFolder) {
+                const scopeRef = queryInfo.folder || queryInfo.folderId || null;
+                return {
+                    success: false,
+                    action: "rpc",
+                    method,
+                    error: `Unable to resolve folder scope for account '${accountIdHint || "?"}' (${JSON.stringify(scopeRef)})`
+                };
             }
             delete queryInfo.folderId;
             delete queryInfo.accountId;
@@ -1565,22 +1869,38 @@ async function executeRpcCommand(cmd) {
             }
 
             if (result && Array.isArray(result.messages) && (accountIdHint || expectedFolderPath)) {
+                const originalCount = result.messages.length;
+                const filteredMessages = filterMessagesByScope(result.messages, accountIdHint, expectedFolderPath);
+                if (requestedScopedQuery && originalCount > 0 && filteredMessages.length === 0) {
+                    return {
+                        success: false,
+                        action: "rpc",
+                        method,
+                        error: `Scope mismatch: query returned ${originalCount} out-of-scope messages for ${accountIdHint || "?"} ${expectedFolderPath || ""}`.trim()
+                    };
+                }
                 result = {
                     ...result,
-                    messages: filterMessagesByScope(result.messages, accountIdHint, expectedFolderPath),
+                    messages: filteredMessages,
                 };
             }
         } else if (method === "folders.query") {
             const queryInfo = (args[0] && typeof args[0] === "object") ? args[0] : {};
             const accountId = queryInfo.accountId != null ? String(queryInfo.accountId) : "";
-            result = await messenger.folders.query(queryInfo);
-            if (Array.isArray(result) && accountId) {
-                result = result.filter((folder) => {
-                    if (!folder || typeof folder !== "object") return false;
-                    const folderAccountId = folder.accountId != null ? String(folder.accountId) : "";
-                    return !folderAccountId || folderAccountId === accountId;
-                });
+            if (accountId) {
+                const accountFolders = await getAccountFolders(accountId);
+                if (accountFolders.length > 0) {
+                    result = applyFolderQueryFilters(accountFolders, queryInfo);
+                } else {
+                    result = await messenger.folders.query(queryInfo);
+                    if (Array.isArray(result)) {
+                        result = applyFolderQueryFilters(result, queryInfo);
+                    }
+                }
+            } else {
+                result = await messenger.folders.query(queryInfo);
             }
+
         } else {
             const fn = getRpcFunctionByPath(method);
             if (!fn) {
@@ -1937,10 +2257,23 @@ async function handleBackfillRepliedForwarded(cmd) {
         lastProgressPostAt = Date.now();
 
         outer: for (const folder of targetFolders) {
+            // Check cancellation between folders
+            if (commandId && cancelledJobIds.has(commandId)) {
+                result.completed_reason = "cancelled";
+                result.success = true;
+                break outer;
+            }
             step = `iterateFolderMessagesSince(accountId=${folder.accountId} folderPath=${folder.path || ""})`;
             result.folders_scanned += 1;
             for await (const sentMsg of iterateFolderMessagesSince(folder, cutoffMs, 100)) {
                 if (result.processed >= limit) break outer;
+
+                // Check cancellation every message
+                if (commandId && cancelledJobIds.has(commandId)) {
+                    result.completed_reason = "cancelled";
+                    result.success = true;
+                    break outer;
+                }
 
                 const dateMs = getMessageDateMs(sentMsg);
                 if (dateMs != null && dateMs < cutoffMs) continue;
@@ -2016,9 +2349,15 @@ async function handleBackfillRepliedForwarded(cmd) {
             }
         }
 
-        result.completed_reason = result.processed >= limit ? "limit_reached" : "exhausted";
-        step = "postProgressUpdate(completed)";
-        await postProgressUpdate(commandId, result.processed, result.processed, "completed", {
+        if (result.completed_reason !== "cancelled") {
+            result.completed_reason = result.processed >= limit ? "limit_reached" : "exhausted";
+        }
+        // Clean up cancel tracking + prune stale entries
+        if (commandId) cancelledJobIds.delete(commandId);
+        pruneCancelledJobIds();
+        const finalStatus = result.completed_reason === "cancelled" ? "cancelled" : "completed";
+        step = `postProgressUpdate(${finalStatus})`;
+        await postProgressUpdate(commandId, result.processed, result.processed, finalStatus, {
             step,
             folders_scanned: result.folders_scanned,
             errors_count: result.errors.length,
@@ -2158,6 +2497,16 @@ async function processCommand(cmd) {
                 count: states.length
             };
         }
+        case "cancel_job": {
+            const targetJobId = cmd.job_id || "";
+            if (targetJobId) {
+                cancelledJobIds.set(targetJobId, Date.now());
+                pruneCancelledJobIds();
+                const removed = removeQueuedCommandsForJob(targetJobId);
+                DebugLogger.log("cmd", "Job cancelled", { job_id: targetJobId, removed_queued: removed });
+            }
+            return { success: true, action: "cancel_job", job_id: targetJobId };
+        }
         case "export_diagnostics":
             return await exportDiagnostics({
                 format: cmd.format || cmd.outputFormat || cmd.output_format,
@@ -2220,8 +2569,7 @@ async function handleWebSocketMessage(msg) {
         // Reuse existing command pipeline (queue + workers).
         const enqueued = enqueueCommands(commands);
         if (IS_TEST_MODE && enqueued > 0) {
-            await runWorkerLoop("fast");
-            await runWorkerLoop("slow");
+            await runWorkerLoop();
         }
         if (commands.length > 0) {
             DebugLogger.log("poll", `WS received ${commands.length} command(s)`, {
@@ -2317,11 +2665,30 @@ const LONG_COMMAND_TIMEOUT_MS = 10 * 60 * 1000; // Allow slow commands more time
 const LONG_RUNNING_ACTIONS = new Set(["backfill_replied_forwarded"]);
 
 const knownCommandIds = new Set(); // prevents re-enqueueing the same server command
+const CANCEL_TTL_MS = 86_400_000; // 24 hours
+const CANCEL_MAX_SIZE = 5000;
+const cancelledJobIds = new Map(); // job_id -> Date.now() timestamp
+
+function pruneCancelledJobIds() {
+    const now = Date.now();
+    // Remove expired entries
+    for (const [id, ts] of cancelledJobIds) {
+        if (now - ts > CANCEL_TTL_MS) cancelledJobIds.delete(id);
+    }
+    // Enforce size cap — drop oldest if over limit
+    if (cancelledJobIds.size > CANCEL_MAX_SIZE) {
+        const sorted = [...cancelledJobIds.entries()].sort((a, b) => a[1] - b[1]);
+        const toDrop = sorted.length - CANCEL_MAX_SIZE;
+        for (let i = 0; i < toDrop; i++) {
+            cancelledJobIds.delete(sorted[i][0]);
+        }
+    }
+}
+const highCommandQueue = [];
 const fastCommandQueue = [];
 const slowCommandQueue = [];
 
-let fastWorkerRunning = false;
-let slowWorkerRunning = false;
+let commandWorkerRunning = false;
 
 const inFlightCommands = new Map(); // id -> { action, startedAt, lane }
 
@@ -2343,6 +2710,13 @@ function safeCommandId(cmd) {
     return null;
 }
 
+function getCommandLane(cmd) {
+    const priority = cmd && cmd.priority != null ? String(cmd.priority).toLowerCase() : "normal";
+    if (priority === "high") return "high";
+    const action = cmd && cmd.action ? String(cmd.action) : "";
+    return LONG_RUNNING_ACTIONS.has(action) ? "slow" : "fast";
+}
+
 function enqueueCommands(commands) {
     if (!Array.isArray(commands) || commands.length === 0) return 0;
 
@@ -2357,9 +2731,10 @@ function enqueueCommands(commands) {
         if (knownCommandIds.has(id)) continue;
         knownCommandIds.add(id);
 
-        const action = cmd && cmd.action ? String(cmd.action) : "";
-        const lane = LONG_RUNNING_ACTIONS.has(action) ? "slow" : "fast";
-        if (lane === "slow") {
+        const lane = getCommandLane(cmd);
+        if (lane === "high") {
+            highCommandQueue.push(cmd);
+        } else if (lane === "slow") {
             slowCommandQueue.push(cmd);
         } else {
             fastCommandQueue.push(cmd);
@@ -2374,6 +2749,30 @@ function enqueueCommands(commands) {
     }
 
     return enqueued;
+}
+
+/**
+ * Remove all queued (not yet in-flight) commands whose id matches the given
+ * job_id.  Also clears their entries from knownCommandIds so dedupe won't
+ * block future commands that re-use those ids.
+ * Returns the number of commands removed.
+ */
+function removeQueuedCommandsForJob(jobId) {
+    if (!jobId) return 0;
+    let removed = 0;
+    for (const q of [fastCommandQueue, slowCommandQueue]) {
+        for (let i = q.length - 1; i >= 0; i--) {
+            const cmd = q[i];
+            const id = safeCommandId(cmd);
+            const cmdJobId = cmd && cmd.job_id != null ? String(cmd.job_id) : null;
+            if (id === jobId || cmdJobId === jobId) {
+                q.splice(i, 1);
+                if (id) knownCommandIds.delete(id);
+                removed++;
+            }
+        }
+    }
+    return removed;
 }
 
 function ensureValidCommandResult(cmd, result, errorMessage) {
@@ -2392,7 +2791,7 @@ async function executeCommandWithTimeout(cmd) {
     const timeoutMs = getCommandTimeoutMs(cmd);
     const startedAt = Date.now();
 
-    let lane = LONG_RUNNING_ACTIONS.has(action) ? "slow" : "fast";
+    const lane = getCommandLane(cmd);
     if (id) {
         inFlightCommands.set(id, { action, startedAt, lane });
     }
@@ -2457,29 +2856,28 @@ async function executeCommandWithTimeout(cmd) {
 }
 
 function startWorkers() {
-    startFastWorker();
-    startSlowWorker();
+    startCommandWorker();
     scheduleCompletionFlush(0);
 }
 
-function startFastWorker() {
-    if (fastWorkerRunning) return;
-    if (fastCommandQueue.length === 0) return;
-    fastWorkerRunning = true;
-    runWorkerLoop("fast").catch(() => {}).finally(() => { fastWorkerRunning = false; startFastWorker(); });
+function startCommandWorker() {
+    if (commandWorkerRunning) return;
+    if (highCommandQueue.length === 0 && fastCommandQueue.length === 0 && slowCommandQueue.length === 0) return;
+    commandWorkerRunning = true;
+    runWorkerLoop().catch(() => {}).finally(() => { commandWorkerRunning = false; startCommandWorker(); });
 }
 
-function startSlowWorker() {
-    if (slowWorkerRunning) return;
-    if (slowCommandQueue.length === 0) return;
-    slowWorkerRunning = true;
-    runWorkerLoop("slow").catch(() => {}).finally(() => { slowWorkerRunning = false; startSlowWorker(); });
+function shiftNextCommand() {
+    if (highCommandQueue.length > 0) return highCommandQueue.shift();
+    if (fastCommandQueue.length > 0) return fastCommandQueue.shift();
+    if (slowCommandQueue.length > 0) return slowCommandQueue.shift();
+    return null;
 }
 
-async function runWorkerLoop(lane) {
-    const queue = lane === "slow" ? slowCommandQueue : fastCommandQueue;
-    while (queue.length > 0) {
-        const cmd = queue.shift();
+async function runWorkerLoop() {
+    while (true) {
+        const cmd = shiftNextCommand();
+        if (!cmd) break;
         if (!cmd) continue;
         const res = await executeCommandWithTimeout(cmd);
         completionQueue.push(res);
@@ -2765,3 +3163,87 @@ DebugLogger.log("startup", `Cortex1 Thunderbird Sync v${getExtensionVersion()} l
 console.log(
     `Cortex1 Thunderbird Sync v${getExtensionVersion()} loaded - WebSocket IPC`
 );
+
+// Expose test helpers when running under Node/Jest.
+// Thunderbird does not provide `module.exports`, so this is a no-op in production.
+if (typeof module !== "undefined" && module && module.exports) {
+    module.exports = {
+        // Helper functions
+        minifyMessageHeader,
+        minifyFolder,
+        buildTbState,
+        findMessageByHeaderId,
+        findFolder,
+
+        // Action handlers
+        markAsRead,
+        markAsUnread,
+        setFlagged,
+        openMessage,
+        archiveMessages,
+        moveMessages,
+        bulkMarkRead,
+        createReplyDraft,
+        sendReply,
+        getMessageStatus,
+        bulkGetStatus,
+        listFolders,
+
+        // RPC
+        executeRpcCommand,
+        cortexRpc,
+        isAllowedRpcMethodPath,
+        getRpcFunctionByPath,
+        sanitizeRpcResult,
+
+        // Command processing
+        processCommand,
+        enqueueCommands,
+        runWorkerLoop,
+
+        // Event system
+        enqueueEvent,
+        flushEventQueue,
+        postEventBatch,
+        ensureEventQueueLoaded,
+        pollForNewEmails,
+
+        // WebSocket (sole IPC transport)
+        isWebSocketOpen,
+        sendWebSocketMessage,
+        _setWs: function(mockWs) { ws = mockWs; },
+
+        // Diagnostics
+        DebugLogger,
+        FailureTracker,
+        exportDiagnostics,
+        buildDiagnosticsPayload,
+
+        // Tag handling
+        handleSetTags,
+
+        // Backfill
+        handleBackfillRepliedForwarded,
+
+        // Cancel
+        cancelledJobIds,
+        pruneCancelledJobIds,
+        removeQueuedCommandsForJob,
+        CANCEL_TTL_MS,
+        CANCEL_MAX_SIZE,
+
+        // Queues (test access)
+        highCommandQueue,
+        fastCommandQueue,
+        slowCommandQueue,
+        knownCommandIds,
+
+        // Constants
+        DEFAULT_CORTEX_SERVER,
+        POLL_INTERVAL_MS,
+        EVENT_QUEUE_LIMIT,
+        EVENT_BATCH_SIZE,
+        DEBUG_MAX_ENTRIES,
+        FAILURE_MAX_ENTRIES
+    };
+}

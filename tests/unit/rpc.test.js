@@ -464,7 +464,7 @@ describe("RPC Method Execution", () => {
             expect(messenger.messages.list).toHaveBeenCalled();
             expect(result.result.messages).toHaveLength(1);
             expect(result.result.messages[0].id).toBe(2);
-            expect(messenger.messages.list.mock.calls[0][0].path).toBe("/Inbox");
+            expect(messenger.messages.list.mock.calls[0][0].path).toMatch(/^\/inbox$/i);
         });
 
         it("should accept unreadOnly/limit/includeBody without native query type errors", async () => {
@@ -497,6 +497,94 @@ describe("RPC Method Execution", () => {
             expect(messenger.messages.list).toHaveBeenCalled();
             expect(result.result.messages).toHaveLength(1);
             expect(result.result.messages[0].id).toBe(10);
+        });
+
+        it("should fail scoped queries when folder resolution fails (no unscoped fallback)", async () => {
+            messenger.accounts.list.mockResolvedValue([
+                createMockAccount({ id: "account1", folders: [] }),
+                createMockAccount({ id: "account3", folders: [createMockFolder({ accountId: "account3", path: "/INBOX" })] }),
+            ]);
+            messenger.folders.query.mockResolvedValue([
+                createMockFolder({ accountId: "account3", path: "/INBOX" }),
+            ]);
+
+            const result = await bg.executeRpcCommand({
+                method: "messages.query",
+                args: [{
+                    accountId: "account1",
+                    folder: { accountId: "account1", path: "/INBOX" },
+                    fromDate: "2026-02-01T00:00:00.000Z",
+                }],
+            });
+
+            expect(result.success).toBe(false);
+            expect(result.error).toContain("Unable to resolve folder scope");
+            expect(messenger.messages.query).not.toHaveBeenCalled();
+            expect(messenger.messages.list).not.toHaveBeenCalled();
+        });
+
+        it("should fail when scoped query returns only out-of-scope messages", async () => {
+            messenger.accounts.list.mockResolvedValue([
+                createMockAccount({
+                    id: "account1",
+                    folders: [createMockFolder({ accountId: "account1", path: "/INBOX", name: "Inbox" })],
+                }),
+            ]);
+            messenger.messages.list.mockResolvedValue({
+                id: null,
+                messages: [
+                    createMockMessage({
+                        id: 99,
+                        folder: { accountId: "account3", path: "/INBOX", name: "Inbox" },
+                        date: new Date("2026-02-10T12:00:00.000Z"),
+                    }),
+                ],
+            });
+
+            const result = await bg.executeRpcCommand({
+                method: "messages.query",
+                args: [{
+                    accountId: "account1",
+                    folder: { accountId: "account1", path: "/INBOX" },
+                    fromDate: "2026-02-01T00:00:00.000Z",
+                }],
+            });
+
+            expect(result.success).toBe(false);
+            expect(result.error).toContain("Scope mismatch");
+        });
+    });
+
+    describe("folders.query scoping", () => {
+        it("should return only requested account folders from account tree", async () => {
+            messenger.accounts.list.mockResolvedValue([
+                createMockAccount({
+                    id: "account1",
+                    folders: [
+                        createMockFolder({ accountId: "account1", path: "/INBOX", specialUse: ["inbox"] }),
+                        createMockFolder({ accountId: "account1", path: "/Archive", specialUse: [] }),
+                    ],
+                }),
+                createMockAccount({
+                    id: "account3",
+                    folders: [createMockFolder({ accountId: "account3", path: "/INBOX", specialUse: ["inbox"] })],
+                }),
+            ]);
+            messenger.folders.query.mockResolvedValue([
+                createMockFolder({ accountId: "account3", path: "/INBOX", specialUse: ["inbox"] }),
+            ]);
+
+            const result = await bg.executeRpcCommand({
+                method: "folders.query",
+                args: [{ accountId: "account1", specialUse: ["inbox"] }],
+            });
+
+            expect(result.success).toBe(true);
+            expect(Array.isArray(result.result)).toBe(true);
+            expect(result.result.length).toBe(1);
+            expect(result.result[0].accountId).toBe("account1");
+            expect(result.result[0].path).toBe("/INBOX");
+            expect(messenger.folders.query).not.toHaveBeenCalled();
         });
     });
 
