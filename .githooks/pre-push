@@ -1,0 +1,50 @@
+#!/usr/bin/env bash
+# pre-push hook for cortex1-tbird-sync
+# Runs unit tests + stress tests when relevant files have changed.
+# Override: CORTEX_FORCE_STRESS=1  to always run stress tests.
+set -euo pipefail
+
+REPO_ROOT="$(git rev-parse --show-toplevel)"
+cd "$REPO_ROOT"
+
+# Relevant file patterns that should trigger the test gate
+RELEVANT_PATTERNS="background.js|tests/unit/|package.json"
+
+# Determine if relevant files changed vs upstream
+run_tests=false
+
+if [ "${CORTEX_FORCE_STRESS:-}" = "1" ]; then
+    run_tests=true
+    echo "[pre-push] CORTEX_FORCE_STRESS=1 — forcing test run"
+else
+    # Try to find changed files vs the remote tracking branch
+    upstream=$(git rev-parse --abbrev-ref '@{upstream}' 2>/dev/null || true)
+    if [ -z "$upstream" ]; then
+        # No upstream — run tests to be safe
+        run_tests=true
+        echo "[pre-push] No upstream branch — running tests"
+    else
+        changed=$(git diff --name-only "$upstream"...HEAD 2>/dev/null || true)
+        if echo "$changed" | grep -qE "$RELEVANT_PATTERNS"; then
+            run_tests=true
+            echo "[pre-push] Relevant files changed — running tests"
+        fi
+    fi
+fi
+
+if [ "$run_tests" = false ]; then
+    echo "[pre-push] No relevant changes — skipping tests"
+    exit 0
+fi
+
+echo ""
+echo "=== npm test ==="
+npm test || { echo "[pre-push] npm test FAILED — push blocked"; exit 1; }
+
+echo ""
+echo "=== npm run test:stress ==="
+npm run test:stress || { echo "[pre-push] stress tests FAILED — push blocked"; exit 1; }
+
+echo ""
+echo "[pre-push] All gates passed"
+exit 0

@@ -6,7 +6,8 @@
     "test": "jest --coverage",
     "test:watch": "jest --watch",
     "test:unit": "jest tests/unit",
-    "test:integration": "jest tests/integration"
+    "test:integration": "jest tests/integration",
+    "test:stress": "jest --testPathPattern=\"tests/unit/stress_\""
   },
   "devDependencies": {
     "jest": "^29.7.0",
