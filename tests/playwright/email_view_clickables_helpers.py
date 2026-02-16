@@ -699,6 +699,8 @@ def inject_dead_click_detector(
         (opts) => {
             if (typeof DeadClickDetector === 'undefined') return;
             if (DeadClickDetector.isInstalled()) return;
+            // Set the debug gate flag — install() is a no-op without it.
+            window.__DEAD_CLICK_DEBUG__ = true;
             const container = document.querySelector(opts.containerSelector) || document.body;
             DeadClickDetector.install(document.body, {
                 container: container,

@@ -120,6 +120,7 @@ def test_dead_click_tripwire() -> None:
             page.evaluate(
                 """
                 (opts) => {
+                    window.__DEAD_CLICK_DEBUG__ = true;
                     const container = document.querySelector(opts.containerSelector) || document.body;
                     DeadClickDetector.install(document.body, {
                         container: container,

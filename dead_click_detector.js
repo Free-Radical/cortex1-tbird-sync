@@ -540,6 +540,12 @@
             if (installed) return;
             if (!root) throw new Error("DeadClickDetector.install: root element required");
 
+            // Production gate: install() is a no-op unless the debug flag is set.
+            // Playwright helpers set window.__DEAD_CLICK_DEBUG__ = true before calling install().
+            // This prevents accidental activation if the module is ever imported in production.
+            var g = typeof globalThis !== "undefined" ? globalThis : (typeof window !== "undefined" ? window : {});
+            if (!g.__DEAD_CLICK_DEBUG__) return;
+
             var opts = options || {};
             rootEl = root;
             containerEl = opts.container || root;

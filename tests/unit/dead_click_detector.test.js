@@ -151,6 +151,9 @@ beforeEach(() => {
         __deadClicks: undefined,
         __deadClickDetector: undefined,
     };
+    // Enable the debug gate so install() works in test context.
+    // Production safety tests explicitly unset this to prove the gate.
+    global.__DEAD_CLICK_DEBUG__ = true;
     global.MutationObserver = MockMutationObserver;
     global.location = { pathname: "/mail", hash: "" };
     global.XMLHttpRequest = function () {};
@@ -892,6 +895,37 @@ describe("DeadClickDetector", () => {
             // No window globals set
             expect(global.window.__deadClicks).toBeUndefined();
             expect(global.window.__deadClickDetector).toBeUndefined();
+        });
+
+        test("install() is a no-op when __DEAD_CLICK_DEBUG__ is not set", () => {
+            // Unset the debug flag to simulate production
+            delete global.__DEAD_CLICK_DEBUG__;
+            delete global.window.__DEAD_CLICK_DEBUG__;
+
+            const detector = loadDetector();
+            const root = createMockElement("div");
+            detector.install(root, { observeMs: 100 });
+
+            // install() should have silently returned — no activation
+            expect(detector.isInstalled()).toBe(false);
+            expect((root._listeners.click || []).length).toBe(0);
+            expect(global.window.__deadClicks).toBeUndefined();
+            expect(global.window.__deadClickDetector).toBeUndefined();
+        });
+
+        test("install() activates when __DEAD_CLICK_DEBUG__ is set", () => {
+            // Flag is set by beforeEach — confirm install works normally
+            expect(global.__DEAD_CLICK_DEBUG__).toBe(true);
+
+            const detector = loadDetector();
+            const root = createMockElement("div");
+            detector.install(root, { observeMs: 100 });
+
+            expect(detector.isInstalled()).toBe(true);
+            expect(root._listeners.click.length).toBe(1);
+            expect(global.window.__deadClicks).toBeDefined();
+
+            detector.uninstall();
         });
 
         test("uninstall removes all listeners and globals", () => {
