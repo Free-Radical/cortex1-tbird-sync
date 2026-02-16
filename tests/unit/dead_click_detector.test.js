@@ -404,12 +404,12 @@ describe("DeadClickDetector", () => {
     });
 
     describe("rage-click detection", () => {
-        test("records rage click after threshold dead clicks on same control", () => {
+        test("records rage click after 5 dead clicks on same control (default threshold)", () => {
             const detector = loadDetector();
             const root = createMockElement("div");
+            // Uses default rageThreshold=5 — matches spec: >=5 within 3s
             detector.install(root, {
                 observeMs: 100,
-                rageThreshold: 3,
                 rageWindowMs: 5000,
             });
 
@@ -419,25 +419,46 @@ describe("DeadClickDetector", () => {
             });
             btn.parentNode = root;
 
-            // Fire 3 dead clicks — each needs full observation window to expire
-            root.dispatchClick(btn);
-            jest.advanceTimersByTime(200); // well past 100ms observe window
-            expect(detector.getEvents().filter(e => e.type === "dead_click").length).toBe(1);
-
-            root.dispatchClick(btn);
-            jest.advanceTimersByTime(200);
-            expect(detector.getEvents().filter(e => e.type === "dead_click").length).toBe(2);
-
-            root.dispatchClick(btn);
-            jest.advanceTimersByTime(200);
+            // Fire 5 dead clicks — each needs full observation window to expire
+            for (let i = 1; i <= 5; i++) {
+                root.dispatchClick(btn);
+                jest.advanceTimersByTime(200); // well past 100ms observe window
+                expect(detector.getEvents().filter(e => e.type === "dead_click").length).toBe(i);
+            }
 
             const events = detector.getEvents();
             const deadEvents = events.filter(e => e.type === "dead_click");
             const rageEvents = events.filter(e => e.type === "rage_click");
-            expect(deadEvents.length).toBe(3);
+            expect(deadEvents.length).toBe(5);
             expect(rageEvents.length).toBe(1);
             expect(rageEvents[0].control.testId).toBe("btn-broken");
-            expect(rageEvents[0].deadClickCount).toBe(3);
+            expect(rageEvents[0].deadClickCount).toBe(5);
+
+            detector.uninstall();
+        });
+
+        test("4 dead clicks on same control does NOT trigger rage click", () => {
+            const detector = loadDetector();
+            const root = createMockElement("div");
+            detector.install(root, {
+                observeMs: 100,
+                rageWindowMs: 5000,
+            });
+
+            const btn = createMockElement("button", {
+                "data-testid": "btn-broken",
+                _text: "Broken Button",
+            });
+            btn.parentNode = root;
+
+            // Only 4 dead clicks — below threshold of 5
+            for (let i = 0; i < 4; i++) {
+                root.dispatchClick(btn);
+                jest.advanceTimersByTime(200);
+            }
+
+            const rageEvents = detector.getEvents().filter(e => e.type === "rage_click");
+            expect(rageEvents.length).toBe(0);
 
             detector.uninstall();
         });
@@ -447,23 +468,21 @@ describe("DeadClickDetector", () => {
             const root = createMockElement("div");
             detector.install(root, {
                 observeMs: 100,
-                rageThreshold: 3,
                 rageWindowMs: 5000,
             });
 
-            const btn1 = createMockElement("button", { "data-testid": "btn-a", _text: "A" });
-            const btn2 = createMockElement("button", { "data-testid": "btn-b", _text: "B" });
-            const btn3 = createMockElement("button", { "data-testid": "btn-c", _text: "C" });
-            btn1.parentNode = root;
-            btn2.parentNode = root;
-            btn3.parentNode = root;
+            const buttons = [];
+            for (let i = 0; i < 5; i++) {
+                const btn = createMockElement("button", { "data-testid": `btn-${i}`, _text: `B${i}` });
+                btn.parentNode = root;
+                buttons.push(btn);
+            }
 
-            root.dispatchClick(btn1);
-            jest.advanceTimersByTime(150);
-            root.dispatchClick(btn2);
-            jest.advanceTimersByTime(150);
-            root.dispatchClick(btn3);
-            jest.advanceTimersByTime(150);
+            // 5 dead clicks but each on a different control
+            for (const btn of buttons) {
+                root.dispatchClick(btn);
+                jest.advanceTimersByTime(150);
+            }
 
             const rageEvents = detector.getEvents().filter(e => e.type === "rage_click");
             expect(rageEvents.length).toBe(0);
