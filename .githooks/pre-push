@@ -8,7 +8,7 @@ REPO_ROOT="$(git rev-parse --show-toplevel)"
 cd "$REPO_ROOT"
 
 # Relevant file patterns that should trigger the test gate
-RELEVANT_PATTERNS="background.js|tests/unit/|package.json"
+RELEVANT_PATTERNS="background.js|dead_click_detector.js|tests/unit/|package.json|scripts/"
 
 # Determine if relevant files changed vs upstream
 run_tests=false
@@ -44,6 +44,10 @@ npm test || { echo "[pre-push] npm test FAILED — push blocked"; exit 1; }
 echo ""
 echo "=== npm run test:stress ==="
 npm run test:stress || { echo "[pre-push] stress tests FAILED — push blocked"; exit 1; }
+
+echo ""
+echo "=== npm run test:dead-clicks ==="
+npm run test:dead-clicks || { echo "[pre-push] dead-click detector tests FAILED — push blocked"; exit 1; }
 
 echo ""
 echo "[pre-push] All gates passed"
