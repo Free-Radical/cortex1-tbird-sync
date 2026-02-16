@@ -217,3 +217,41 @@ from `email_view_clickables_helpers.py` (injection, collection, reset).  The
 tripwire runs in CI on every push; the full inventory test runs on-demand or in
 scheduled CI.  Both inject the same `dead_click_detector.js` and assert zero
 dead clicks via shared helper functions.
+
+---
+
+## How to debug a regression
+
+When a dead-click test fails, follow this checklist:
+
+1. **Run the tripwire test** to reproduce quickly:
+   ```bash
+   EMAIL_VIEW_BASE_URL=http://localhost:3000 \
+     python -m pytest tests/playwright/test_dead_click_tripwire.py -v
+   ```
+
+2. **Run the heavy inventory test** for full coverage:
+   ```bash
+   EMAIL_VIEW_BASE_URL=http://localhost:3000 \
+     python -m pytest tests/playwright/test_email_view_all_clickables.py -v
+   ```
+   Check the JSON report at `tests/artifacts/playwright/email_view_smoke/email_view_clickables_report.json` —
+   the `dead_clicks` array lists every detected event with `testId`, `route`, and `bbox`.
+
+3. **Open `/__diag`** in the running app (`moz-extension://<id>/__diag.html`)
+   to see live dead-click events.  Filter by testid or route to isolate the
+   broken control.
+
+4. **Check if the control should be allowlisted.**  If the click is intentionally
+   a no-op (e.g. clipboard copy, focus-only input), add it to the allowlist via
+   `install({ allowlist: [{ testId: '...' }] })` or update the Playwright
+   injection call.  See the "Allowlist format" section above.
+
+5. **Verify testid scope.**  If `check_testids.js` flags a control inside the
+   rendered email body, confirm the body selector
+   (`EMAIL_VIEW_BODY_SELECTOR`) correctly excludes it.  Controls outside the
+   email view container are not checked.
+
+6. **Fix the root cause.**  If the control genuinely broke (handler removed,
+   event binding missing), fix the handler and re-run both tests to confirm
+   green.
