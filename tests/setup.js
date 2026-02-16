@@ -140,7 +140,7 @@ const createMockMessenger = () => {
         },
         storage: mockStorage,
         runtime: {
-            getManifest: jest.fn(() => ({ version: "1.6.5" })),
+            getManifest: jest.fn(() => ({ version: "1.6.6" })),
             id: "cortex1-tbird-sync@example.com"
         },
         downloads: {
@@ -155,12 +155,18 @@ const createMockMessenger = () => {
         action: {
             onClicked: {
                 addListener: jest.fn()
-            }
+            },
+            setBadgeText: jest.fn(),
+            setBadgeBackgroundColor: jest.fn(),
+            setTitle: jest.fn()
         },
         browserAction: {
             onClicked: {
                 addListener: jest.fn()
-            }
+            },
+            setBadgeText: jest.fn(),
+            setBadgeBackgroundColor: jest.fn(),
+            setTitle: jest.fn()
         },
         commands: {
             onCommand: {
@@ -349,6 +355,11 @@ module.exports = {
                 fastCommandQueue,
                 slowCommandQueue,
                 knownCommandIds,
+
+                // Indicator
+                setIndicator,
+                getQueueDepth,
+                ACT,
 
                 // Constants
                 DEFAULT_CORTEX_SERVER,

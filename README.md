@@ -35,7 +35,7 @@ No native messaging, no Python helper - just install the .xpi.
 
 That's it. The extension will start polling cortex_server automatically.
 
-Note: In newer Thunderbird/Betterbird versions, the "Cortex1 Sync" button may be hidden by default. Use the Extensions (puzzle piece) menu to pin it to the toolbar, or use toolbar customization to place it.
+The "Cortex1 Sync" button is configured to appear in the main toolbar by default (`browser_action.default_area=maintoolbar`).
 
 ## How It Works
 
@@ -132,6 +132,21 @@ Bidirectional WebSocket for real-time communication.
 }
 ```
 
+**GET /tbird-sync/status** (recommended for health checks)
+```json
+{
+  "connection": {"connected": true},
+  "mail_recency": {
+    "last_event_received_ts": "2026-02-16T12:01:00+00:00",
+    "last_mail_seen_ts": "2026-02-16T12:00:00+00:00",
+    "last_mail_ingested_ts": "2026-02-16T12:00:30+00:00",
+    "lag_seconds": 30,
+    "max_lag_seconds": 1800,
+    "stale": false
+  }
+}
+```
+
 ## Supported Actions
 
 ### Single Message Actions
@@ -180,6 +195,12 @@ These are stored in `messenger.storage.local`:
 
 - `cortex_server_url`: override server base URL (default: `http://localhost:5001`)
 - `cortex_event_push_enabled`: set to `false` to disable HTTP event push (default: enabled)
+
+## Real-Time Ingest Model
+
+- Primary path: `messages.onNewMailReceived` (registered with `monitorAllFolders=true`).
+- Fallback path: periodic inbox polling detects new mail even when event delivery is missed.
+- Result: ingest remains event + polling, not event-only.
 
 ## Diagnostics
 

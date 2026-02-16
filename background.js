@@ -506,10 +506,10 @@ async function flushEventQueue() {
     }
 }
 
-function safeAddListener(eventObj, handler) {
+function safeAddListener(eventObj, handler, ...listenerArgs) {
     try {
         if (eventObj && typeof eventObj.addListener === "function") {
-            eventObj.addListener(handler);
+            eventObj.addListener(handler, ...listenerArgs);
         }
     } catch (error) {
         // best-effort; avoid breaking startup on older TB versions
@@ -542,7 +542,7 @@ async function initEventPush() {
             folder: minifyFolder(folder),
             messages: messages.map(minifyMessageHeader)
         });
-    });
+    }, true);
 
     safeAddListener(messenger.messages && messenger.messages.onUpdated, async (message, changedProperties, oldProperties) => {
         await enqueueEvent("messages.onUpdated", {
@@ -2606,6 +2606,7 @@ function scheduleReconnect() {
     }, delay);
 
     connectionState = "RECONNECTING";
+    setIndicator({ connected: false });
 }
 
 async function connectWebSocket() {
@@ -2621,9 +2622,13 @@ async function connectWebSocket() {
             console.log("[WS] Connected to cortex-server");
             wsReconnectAttempts = 0;
             connectionState = "CONNECTED";
+            setIndicator({ connected: true });
             // Flush any queued completions/events that accumulated while disconnected
             scheduleCompletionFlush(0);
             scheduleFlushQueue();
+            flushNewEmailBatch().catch((error) => {
+                DebugLogger.log("new-email", "Flush on reconnect failed", { error: String(error) });
+            });
         };
 
         ws.onmessage = async (event) => {
@@ -2642,10 +2647,12 @@ async function connectWebSocket() {
         ws.onclose = () => {
             console.log("[WS] Disconnected, will reconnect...");
             ws = null;
+            setIndicator({ connected: false });
             scheduleReconnect();
         };
     } catch (error) {
         console.error("[WS] Failed to connect:", error);
+        setIndicator({ connected: false, error: "Connection failed" });
         scheduleReconnect();
     }
 }
@@ -2656,6 +2663,86 @@ async function connectWebSocket() {
 
 // Connection state tracking (best-effort UX/diagnostics)
 let connectionState = "DISCONNECTED"; // CONNECTED, DISCONNECTED, RECONNECTING
+
+// =============================================================================
+// Toolbar badge indicator (green-light / busy / error)
+// =============================================================================
+
+const ACT = (typeof messenger !== "undefined" && messenger)
+    ? (messenger.action || messenger.browserAction)
+    : null;
+
+let _indicatorLastUpdate = 0;
+let _indicatorTimer = null;
+
+function getQueueDepth() {
+    return (highCommandQueue ? highCommandQueue.length : 0)
+         + (fastCommandQueue ? fastCommandQueue.length : 0)
+         + (slowCommandQueue ? slowCommandQueue.length : 0);
+}
+
+function setIndicator(opts) {
+    const now = Date.now();
+    const elapsed = now - _indicatorLastUpdate;
+
+    if (elapsed < 1000) {
+        // Throttle: schedule a deferred update if not already pending
+        if (!_indicatorTimer) {
+            _indicatorTimer = setTimeout(() => {
+                _indicatorTimer = null;
+                setIndicator(opts);
+            }, 1000 - elapsed);
+        }
+        return;
+    }
+
+    _indicatorLastUpdate = now;
+
+    if (!ACT) return;
+
+    const connected = opts && opts.connected !== undefined
+        ? opts.connected
+        : connectionState === "CONNECTED";
+    const error = opts && opts.error ? opts.error : null;
+    const busy = opts && opts.busy !== undefined ? opts.busy : false;
+    const queueDepth = opts && opts.queueDepth !== undefined
+        ? opts.queueDepth
+        : getQueueDepth();
+
+    let badgeText, badgeColor, tooltip;
+
+    if (error || !connected) {
+        badgeText = "!";
+        badgeColor = "#e74c3c"; // red
+        tooltip = error
+            ? "Cortex: Error: " + String(error).slice(0, 80)
+            : "Cortex: Disconnected";
+    } else if (busy || queueDepth > 0) {
+        badgeText = queueDepth > 0
+            ? (queueDepth > 99 ? "99+" : String(queueDepth))
+            : "\u2026"; // ellipsis
+        badgeColor = "#f1c40f"; // yellow
+        tooltip = "Cortex: Connected | Queue: " + queueDepth;
+    } else {
+        badgeText = "OK";
+        badgeColor = "#2ecc71"; // green
+        tooltip = "Cortex: Connected | Idle";
+    }
+
+    try {
+        if (typeof ACT.setBadgeText === "function") {
+            ACT.setBadgeText({ text: badgeText });
+        }
+        if (typeof ACT.setBadgeBackgroundColor === "function") {
+            ACT.setBadgeBackgroundColor({ color: badgeColor });
+        }
+        if (typeof ACT.setTitle === "function") {
+            ACT.setTitle({ title: tooltip });
+        }
+    } catch (e) {
+        // best-effort; avoid breaking the extension
+    }
+}
 
 // Command execution is decoupled from polling so long-running commands cannot
 // block the next /pending poll. This keeps `last_poll_ago` low even during
@@ -2743,6 +2830,7 @@ function enqueueCommands(commands) {
     }
 
     if (enqueued > 0) {
+        setIndicator({ connected: connectionState === "CONNECTED", busy: true, queueDepth: getQueueDepth() });
         if (!IS_TEST_MODE) {
             startWorkers();
         }
@@ -2852,6 +2940,10 @@ async function executeCommandWithTimeout(cmd) {
         error: finalResult.error
     });
 
+    if (!finalResult.success) {
+        setIndicator({ connected: connectionState === "CONNECTED", error: finalResult.error });
+    }
+
     return finalResult;
 }
 
@@ -2879,6 +2971,8 @@ async function runWorkerLoop() {
         const cmd = shiftNextCommand();
         if (!cmd) break;
         if (!cmd) continue;
+        const depth = getQueueDepth();
+        setIndicator({ connected: connectionState === "CONNECTED", busy: depth > 0, queueDepth: depth });
         const res = await executeCommandWithTimeout(cmd);
         completionQueue.push(res);
         if (IS_TEST_MODE) {
@@ -2887,6 +2981,8 @@ async function runWorkerLoop() {
             scheduleCompletionFlush(0);
         }
     }
+    // Queue drained — update indicator to idle (or disconnected)
+    setIndicator({ connected: connectionState === "CONNECTED", queueDepth: 0 });
 }
 
 function scheduleCompletionFlush(delayMs) {
@@ -2979,6 +3075,9 @@ safeAddListener(commandEvent, (command) => {
 // HTTP polling watchdog and pollLoop removed — WebSocket is the sole transport.
 
 console.log("[cortex1-tbird-sync] background.js loaded, IS_TEST_MODE:", IS_TEST_MODE);
+// Set initial indicator to disconnected before WS connects
+setIndicator({ connected: false });
+
 if (!IS_TEST_MODE) {
     // WebSocket is the sole IPC transport to cortex-server.
     console.log("[cortex1-tbird-sync] Connecting via WebSocket...");
@@ -3148,7 +3247,7 @@ safeAddListener(messenger.messages && messenger.messages.onNewMailReceived, asyn
             date: msg && msg.date ? new Date(msg.date).toISOString() : null
         });
     }
-});
+}, true);
 
 if (!IS_TEST_MODE) {
     pollForNewEmails().catch((error) => DebugLogger.log("new-email", "Poll failed", { error: String(error) }));
@@ -3237,6 +3336,11 @@ if (typeof module !== "undefined" && module && module.exports) {
         fastCommandQueue,
         slowCommandQueue,
         knownCommandIds,
+
+        // Indicator
+        setIndicator,
+        getQueueDepth,
+        get ACT() { return ACT; },
 
         // Constants
         DEFAULT_CORTEX_SERVER,
