@@ -1,0 +1,78 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Cortex1 – Dead-Click Diagnostics</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font: 13px/1.5 "Cascadia Code", "Fira Code", monospace; background: #0f172a; color: #e2e8f0; padding: 16px; }
+    h1 { font-size: 16px; margin-bottom: 8px; color: #38bdf8; }
+    .toolbar { display: flex; gap: 8px; margin-bottom: 12px; flex-wrap: wrap; align-items: center; }
+    .toolbar button {
+      background: #1e293b; color: #94a3b8; border: 1px solid #334155; border-radius: 4px;
+      padding: 4px 12px; cursor: pointer; font: inherit; font-size: 12px;
+    }
+    .toolbar button:hover { background: #334155; color: #e2e8f0; }
+    .toolbar .count { color: #64748b; font-size: 12px; padding: 4px 0; }
+    .filter-row { margin-bottom: 8px; display: flex; gap: 8px; align-items: center; }
+    .filter-row label { color: #64748b; font-size: 12px; }
+    .filter-row select, .filter-row input {
+      background: #1e293b; color: #e2e8f0; border: 1px solid #334155; border-radius: 4px;
+      padding: 2px 8px; font: inherit; font-size: 12px;
+    }
+    table { width: 100%; border-collapse: collapse; font-size: 12px; }
+    th { text-align: left; padding: 4px 8px; color: #64748b; border-bottom: 1px solid #1e293b; position: sticky; top: 0; background: #0f172a; }
+    td { padding: 4px 8px; border-bottom: 1px solid #1e293b; vertical-align: top; }
+    tr:hover td { background: #1e293b; }
+    .type-dead_click { color: #fbbf24; }
+    .type-rage_click { color: #ef4444; font-weight: bold; }
+    .badge { display: inline-block; padding: 1px 6px; border-radius: 3px; font-size: 11px; }
+    .badge-dead { background: #78350f; color: #fbbf24; }
+    .badge-rage { background: #7f1d1d; color: #fca5a5; }
+    .mono { font-family: inherit; }
+    .empty-state { color: #475569; text-align: center; padding: 48px 16px; }
+    .empty-state p { margin-bottom: 8px; }
+    #status { color: #22c55e; font-size: 12px; margin-left: 8px; }
+  </style>
+</head>
+<body>
+  <h1>Dead-Click Diagnostics</h1>
+  <div class="toolbar">
+    <button id="btn-refresh" title="Refresh from window.__deadClicks">Refresh</button>
+    <button id="btn-export">Export JSON</button>
+    <button id="btn-clear">Clear</button>
+    <span class="count" id="event-count">0 events</span>
+    <span id="status"></span>
+  </div>
+  <div class="filter-row">
+    <label>Type:</label>
+    <select id="filter-type">
+      <option value="">All</option>
+      <option value="dead_click">Dead Click</option>
+      <option value="rage_click">Rage Click</option>
+    </select>
+    <label>Search:</label>
+    <input id="filter-search" type="text" placeholder="testid, name, route…" size="30">
+  </div>
+  <table>
+    <thead>
+      <tr>
+        <th>#</th>
+        <th>Type</th>
+        <th>Time</th>
+        <th>Route</th>
+        <th>Control</th>
+        <th>testid</th>
+        <th>BBox</th>
+      </tr>
+    </thead>
+    <tbody id="event-tbody"></tbody>
+  </table>
+  <div id="empty-state" class="empty-state" style="display:none">
+    <p>No dead-click events recorded yet.</p>
+    <p>Install the detector: <code>DeadClickDetector.install(document.body)</code></p>
+  </div>
+
+  <script src="__diag.js"></script>
+</body>
+</html>
