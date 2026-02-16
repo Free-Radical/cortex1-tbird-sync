@@ -68,5 +68,10 @@ def test_backfill_progress_heartbeat_and_completion_totals():
     assert "PROGRESS_EVERY_N_MESSAGES" in bg
     assert "PROGRESS_MIN_INTERVAL_MS" in bg
     # Completion should report total==processed so server UI renders 100%.
-    assert 'postProgressUpdate(commandId, result.processed, result.processed, "completed"' in bg
+    assert (
+        'postProgressUpdate(commandId, result.processed, result.processed, "completed"' in bg
+        or 'postProgressUpdate(commandId, result.processed, result.processed, finalStatus' in bg
+    )
+    if 'postProgressUpdate(commandId, result.processed, result.processed, finalStatus' in bg:
+        assert 'const finalStatus = result.completed_reason === "cancelled" ? "cancelled" : "completed";' in bg
     assert 'postProgressUpdate(commandId, processed, processed, "failed"' in bg

@@ -10,6 +10,7 @@
  */
 
 const { createMockMessage, createMockFolder, loadBackgroundScript } = require("../setup");
+const { getMockMessenger } = require("../setup");
 
 function mockOpenWebSocket(bg) {
     const mockWs = { readyState: 1, send: jest.fn() }; // WebSocket.OPEN = 1
@@ -29,6 +30,15 @@ describe("Event Push System", () => {
         });
 
         bg = loadBackgroundScript();
+    });
+
+    it("registers onNewMailReceived listeners with monitorAllFolders=true", () => {
+        const messenger = getMockMessenger();
+        const calls = messenger.messages.onNewMailReceived.addListener.mock.calls;
+        expect(calls.length).toBeGreaterThan(0);
+        for (const args of calls) {
+            expect(args[1]).toBe(true);
+        }
     });
 
     // =========================================================================
@@ -372,6 +382,29 @@ describe("Event Push System", () => {
     // New Email Polling Fallback
     // =========================================================================
     describe("New Email Inbox Polling", () => {
+        it("should still detect new mail via polling when onNewMailReceived listener registration fails", async () => {
+            const messenger = getMockMessenger();
+            messenger.messages.onNewMailReceived.addListener.mockImplementation(() => {
+                throw new Error("listener broken");
+            });
+
+            bg = loadBackgroundScript();
+            const mockWs = mockOpenWebSocket(bg);
+
+            messenger.messages.query.mockResolvedValue({
+                messages: [createMockMessage({ headerMessageId: "<poll-only@example.com>" })]
+            });
+
+            await bg.pollForNewEmails();
+            jest.advanceTimersByTime(250);
+            await Promise.resolve();
+
+            const sentMessages = mockWs.send.mock.calls.map((c) => JSON.parse(c[0]));
+            const newEmailEvents = sentMessages.filter((m) => m.event && m.event.type === "new_email");
+            expect(newEmailEvents.length).toBe(1);
+            expect(newEmailEvents[0].event.message_id).toBe("<poll-only@example.com>");
+        });
+
         it("should send new emails found via inbox polling through WebSocket", async () => {
             const mockWs = mockOpenWebSocket(bg);
             messenger.messages.query.mockResolvedValue({
