@@ -1274,9 +1274,15 @@ async function createReplyDraft(messageId, replyBody, replyAll = false) {
     }
     try {
         const replyType = replyAll ? "replyToAll" : "replyToSender";
-        const tab = await messenger.compose.beginReply(message.id, replyType, {
-            body: replyBody
-        });
+        const details = {};
+        if (replyBody && replyBody.trim()) {
+            const htmlBody = replyBody
+                .split('\n\n')
+                .map(p => '<p>' + p.replace(/\n/g, '<br>') + '</p>')
+                .join('');
+            details.body = htmlBody;
+        }
+        const tab = await messenger.compose.beginReply(message.id, replyType, details);
         return {
             success: true,
             messageId,

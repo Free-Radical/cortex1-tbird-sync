@@ -409,7 +409,7 @@ describe("Action Handlers", () => {
             expect(messenger.compose.beginReply).toHaveBeenCalledWith(
                 mockMsg.id,
                 "replyToSender",
-                { body: "Reply body" }
+                { body: "<p>Reply body</p>" }
             );
         });
 
@@ -427,7 +427,7 @@ describe("Action Handlers", () => {
             expect(messenger.compose.beginReply).toHaveBeenCalledWith(
                 mockMsg.id,
                 "replyToAll",
-                { body: "Reply body" }
+                { body: "<p>Reply body</p>" }
             );
         });
 
