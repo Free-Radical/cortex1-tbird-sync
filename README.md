@@ -1,5 +1,7 @@
 # cortex1-tbird-sync
 
+> **License:** Source-available under PolyForm Noncommercial 1.0.0. Personal, hobby, educational, research, evaluation, and other noncommercial use are allowed. Commercial, hosted, customer-facing, internal business, paid, or other monetized use requires a separate written license. See `LICENSE`, `NOTICE.md`, and `COMMERCIAL-LICENSE.md`.
+
 Thunderbird extension that syncs message status with cortex_server via **WebSocket IPC** (primary) with HTTP polling fallback.
 
 ## Overview
@@ -218,11 +220,8 @@ The export is saved as JSON/JSONL via the downloads API so it works even when `c
 
 ## License
 
-Business Source License 1.1 (BSL 1.1)
+PolyForm Noncommercial License 1.0.0.
 
-- Non-production use allowed; production/commercial/hosted use requires a commercial license.
-- Change Date: 2030-01-01
-- Change License: Apache 2.0
+- Personal, hobby, educational, research, evaluation, and other noncommercial use are allowed.
+- Commercial, hosted, customer-facing, internal business, paid, or other monetized use requires a separate written commercial license.
 - Contact: Saqib.Khan@Me.com
-
-This repository is licensed under BSL 1.1 with the Additional Use Grant in LICENSE.
