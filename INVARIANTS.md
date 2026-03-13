@@ -126,3 +126,26 @@ Build artifacts, runtime logs, and files belonging to other repos must not accum
 ## Repository Visibility
 
 This repository is **public** (source-available). It is distributed as a Thunderbird extension and must remain accessible for users to review, build, and install. Do not make this repo private without providing an alternative distribution channel.
+
+## Proprietary Content Guard (Public Repo)
+
+This repository is **public**. Before every push, reasonable efforts MUST be made to verify that no proprietary techniques, secret algorithms, internal business logic, API keys, credentials, or "secret sauce" from private repos (cortex1-core, zeroveil-gateway-pro, zeroveil-pro, cortex1-forge) has leaked into this codebase.
+
+**Pre-push requirement:** The pre-push hook MUST display a prominent warning and require explicit user acknowledgment (interactive Y/n prompt) before allowing any push to a remote. The warning must state:
+
+```
+╔══════════════════════════════════════════════════════════════╗
+║  WARNING: This is a PUBLIC repository.                      ║
+║  Have you verified no proprietary code or secrets are       ║
+║  included in this push?                                     ║
+╚══════════════════════════════════════════════════════════════╝
+```
+
+If the user does not confirm, the push MUST be blocked. Non-interactive pushes (CI/CD) should fail-safe by blocking unless an explicit bypass env var is set.
+
+**What to check:**
+- No internal API endpoints, auth tokens, or credentials
+- No proprietary algorithms or business logic from private repos
+- No references to internal infrastructure (hostnames, IPs, internal URLs)
+- No config files or env templates with real values
+- No code copied from private repos without explicit approval from the repo owner
