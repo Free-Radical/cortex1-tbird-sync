@@ -1,0 +1,151 @@
+# Developer Reference
+
+Technical reference for cortex_server implementors and extension contributors.
+
+## Architecture
+
+### WebSocket Mode (Primary)
+
+```
+┌─────────────────┐                    ┌──────────────────┐
+│ cortex_server   │ ═══ WebSocket ════ │ TB Extension     │
+│ (port 5001)     │ ws://localhost:5001│                  │
+│                 │   /tbird-sync/ws   │                  │
+└─────────────────┘                    └──────────────────┘
+      │                                        │
+      │  ─── {type:"command", data:{...}} ───▶ │
+      │  ◀── {type:"result", data:{...}} ────  │
+      │  ◀── {type:"event", data:{...}} ─────  │
+      │  ─── {type:"ping"} ─────────────────▶  │
+      │  ◀── {type:"pong"} ─────────────────── │
+```
+
+1. Extension connects to WebSocket on startup
+2. Server pushes commands in real-time
+3. Extension executes commands via `messenger.messages.update()`
+4. Extension sends results/events back via WebSocket
+5. Auto-reconnect with exponential backoff (1s -> 2s -> 4s -> ... -> 30s max)
+
+### HTTP Fallback Mode
+
+```
+┌─────────────────┐                    ┌──────────────────┐
+│ cortex_server   │ <── GET /pending ──│ TB Extension     │
+│ (port 5001)     │                    │ (polls every 3s) │
+│                 │ ── POST /complete →│                  │
+└─────────────────┘                    └──────────────────┘
+```
+
+Activates automatically when WebSocket is unavailable:
+1. Extension polls `GET /tbird-sync/pending` every 3 seconds
+2. Server returns command list
+3. Extension executes and reports via `POST /tbird-sync/complete`
+
+## Server Endpoints
+
+The extension expects these endpoints on `localhost:5001`:
+
+### WebSocket Endpoint (Primary)
+
+**WS /tbird-sync/ws**
+
+Bidirectional WebSocket for real-time communication.
+
+**Server → Extension messages:**
+```json
+{"type": "command", "data": {"id": "uuid", "action": "mark_read", "messageId": "..."}}
+{"type": "ping", "data": {}}
+```
+
+**Extension → Server messages:**
+```json
+{"type": "result", "data": {"id": "uuid", "success": true, "action": "mark_read"}}
+{"type": "event", "data": {"event_type": "messages.onNewMailReceived", ...}}
+{"type": "pong", "data": {"timestamp": 1234567890}}
+```
+
+### HTTP Endpoints (Fallback)
+
+**GET /tbird-sync/pending**
+```json
+{
+  "commands": [
+    {"id": "uuid", "action": "mark_read", "messageId": "msg-id@example.com"},
+    {"id": "uuid", "action": "set_flagged", "messageId": "msg-id@example.com", "flagged": true}
+  ]
+}
+```
+
+**POST /tbird-sync/complete**
+```json
+{
+  "results": [
+    {"id": "uuid", "success": true, "action": "mark_read"},
+    {"id": "uuid", "success": false, "error": "Message not found"}
+  ]
+}
+```
+
+**POST /tbird-sync/events** (optional)
+```json
+{
+  "events": [
+    {"event_id":"...","event_type":"messages.onNewMailReceived","ts_ms":1730000000000,"seq":1,"payload":{...}}
+  ]
+}
+```
+
+**GET /tbird-sync/status** (recommended for health checks)
+```json
+{
+  "connection": {"connected": true},
+  "mail_recency": {
+    "last_event_received_ts": "2026-02-16T12:01:00+00:00",
+    "last_mail_seen_ts": "2026-02-16T12:00:00+00:00",
+    "last_mail_ingested_ts": "2026-02-16T12:00:30+00:00",
+    "lag_seconds": 30,
+    "max_lag_seconds": 1800,
+    "stale": false
+  }
+}
+```
+
+## Supported Actions
+
+### Single Message Actions
+
+| Action | Description |
+|--------|-------------|
+| `mark_read` | Set message read=true |
+| `mark_unread` | Set message read=false |
+| `set_flagged` | Set flagged status (requires `flagged: true/false`) |
+| `open_message` | Open message in new Thunderbird window |
+| `get_status` | Get live read/flagged status from Thunderbird |
+| `create_draft` | Create reply draft (requires `body`, optional `replyAll`) |
+| `send_reply` | Send reply immediately (requires `body`, optional `replyAll`) |
+
+### Batch Actions
+
+| Action | Description |
+|--------|-------------|
+| `archive` | Archive messages (requires `messageIds` array) |
+| `move` | Move messages to folder (requires `messageIds`, `folder`) |
+| `bulk_mark_read` | Mark multiple messages as read (requires `messageIds`) |
+| `bulk_get_status` | Get status of multiple messages (requires `messageIds`) |
+| `list_folders` | List all available folders |
+
+### Generic Action
+
+| Action | Description |
+|--------|-------------|
+| `rpc` | Execute an allowlisted Thunderbird WebExtension method (`method`, `args`) |
+
+### Status Query Notes
+
+The `get_status` and `bulk_get_status` commands return **live status** from Thunderbird:
+- `read`: Whether message is read (accurate)
+- `flagged`: Whether message is starred/flagged (accurate)
+- `junk`: Spam status (accurate)
+
+**Important:** `forwarded` and `replied` status are **NOT available** via Thunderbird's WebExtension API.
+These can only be read from X-Mozilla-Status headers in mbox files, which may be stale until Thunderbird compacts the folder.

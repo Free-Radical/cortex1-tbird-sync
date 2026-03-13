@@ -2,7 +2,7 @@
   "manifest_version": 2,
   "name": "Cortex1 Thunderbird Sync",
   "version": "1.6.6",
-  "description": "Syncs message status with Thunderbird via polling + optional HTTP push",
+  "description": "Syncs email state with cortex_server via WebSocket (primary) with HTTP polling fallback.",
   "author": "Saqib A Khan",
   "homepage_url": "https://github.com/Free-Radical/cortex1-tbird-sync",
   "applications": {
