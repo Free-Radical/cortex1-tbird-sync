@@ -112,3 +112,13 @@ The repo's `TODO.md` MUST be updated before pushing when any of the following ch
 - Post-MVP items are promoted to MVP or vice versa
 
 TODO.md is the public-facing roadmap for this repo. Stale TODOs mislead contributors and other repos that depend on this one.
+
+## No Stale or Misplaced Files
+
+When deleting or removing code, features, or dependencies, all associated artifacts MUST be cleaned up in the same commit:
+- Documentation that describes the removed feature
+- Tests that test the removed code
+- Hook references, CI config, and package.json scripts that invoke removed files
+- Config entries, env vars, and imports that reference removed modules
+
+Build artifacts, runtime logs, and files belonging to other repos must not accumulate in the working tree. Add them to `.gitignore` or delete them.
