@@ -100,3 +100,15 @@ cortexONE-Docs (https://github.com/Free-Radical/cortexONE-Docs) is the Single So
 Key docs to check:
 - `docs/cortex1/v1/modules/email-module.md`
 - `docs/cortex1/v1/SSOT-Core.md`
+
+---
+
+## TODO.md Must Stay Current
+
+The repo's `TODO.md` MUST be updated before pushing when any of the following change:
+- MVP blockers are completed or added
+- New features are implemented that affect the roadmap
+- Blocked items become unblocked
+- Post-MVP items are promoted to MVP or vice versa
+
+TODO.md is the public-facing roadmap for this repo. Stale TODOs mislead contributors and other repos that depend on this one.
