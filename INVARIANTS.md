@@ -86,3 +86,17 @@ For live Thunderbird checks, set `CORTEX_TBIRD_SYNC_LIVE=1` before running `test
 ---
 
 See `TESTING.md` for test tiers, runtime expectations, and troubleshooting.
+
+---
+
+## Architecture SSOT Sync
+
+cortexONE-Docs (https://github.com/Free-Radical/cortexONE-Docs) is the Single Source of Truth for system architecture and design. When changing any of the following in this repo, the corresponding docs in cortexONE-Docs MUST be updated in the same work session:
+
+- WebExtension IPC protocol or message format
+- Sync endpoints or polling behavior
+- Email metadata fields passed to cortex1-core
+
+Key docs to check:
+- `docs/cortex1/v1/modules/email-module.md`
+- `docs/cortex1/v1/SSOT-Core.md`
