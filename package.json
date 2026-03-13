@@ -8,7 +8,6 @@
     "test:unit": "jest tests/unit",
     "test:integration": "jest tests/integration",
     "test:stress": "jest --testPathPattern=\"tests/unit/stress_\"",
-    "test:dead-clicks": "jest --testPathPattern=\"tests/unit/dead_click_detector\"",
     "check:testids": "node scripts/check_testids.js"
   },
   "devDependencies": {
@@ -19,7 +18,7 @@
     "testEnvironment": "node",
     "setupFilesAfterEnv": ["<rootDir>/tests/setup.js"],
     "testMatch": ["**/tests/**/*.test.js"],
-    "collectCoverageFrom": ["background.js", "dead_click_detector.js"],
+    "collectCoverageFrom": ["background.js"],
     "coverageDirectory": "coverage",
     "verbose": true,
     "testTimeout": 5000
