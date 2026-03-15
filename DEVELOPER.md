@@ -26,26 +26,11 @@ Technical reference for cortex_server implementors and extension contributors.
 4. Extension sends results/events back via WebSocket
 5. Auto-reconnect with exponential backoff (1s -> 2s -> 4s -> ... -> 30s max)
 
-### HTTP Fallback Mode
-
-```
-┌─────────────────┐                    ┌──────────────────┐
-│ cortex_server   │ <── GET /pending ──│ TB Extension     │
-│ (port 5001)     │                    │ (polls every 3s) │
-│                 │ ── POST /complete →│                  │
-└─────────────────┘                    └──────────────────┘
-```
-
-Activates automatically when WebSocket is unavailable:
-1. Extension polls `GET /tbird-sync/pending` every 3 seconds
-2. Server returns command list
-3. Extension executes and reports via `POST /tbird-sync/complete`
-
 ## Server Endpoints
 
 The extension expects these endpoints on `localhost:5001`:
 
-### WebSocket Endpoint (Primary)
+### WebSocket Endpoint
 
 **WS /tbird-sync/ws**
 
@@ -64,38 +49,9 @@ Bidirectional WebSocket for real-time communication.
 {"type": "pong", "data": {"timestamp": 1234567890}}
 ```
 
-### HTTP Endpoints (Fallback)
+### Server-Side Endpoints (not called by extension)
 
-**GET /tbird-sync/pending**
-```json
-{
-  "commands": [
-    {"id": "uuid", "action": "mark_read", "messageId": "msg-id@example.com"},
-    {"id": "uuid", "action": "set_flagged", "messageId": "msg-id@example.com", "flagged": true}
-  ]
-}
-```
-
-**POST /tbird-sync/complete**
-```json
-{
-  "results": [
-    {"id": "uuid", "success": true, "action": "mark_read"},
-    {"id": "uuid", "success": false, "error": "Message not found"}
-  ]
-}
-```
-
-**POST /tbird-sync/events** (optional)
-```json
-{
-  "events": [
-    {"event_id":"...","event_type":"messages.onNewMailReceived","ts_ms":1730000000000,"seq":1,"payload":{...}}
-  ]
-}
-```
-
-**GET /tbird-sync/status** (recommended for health checks)
+**GET /tbird-sync/status** (recommended for health checks, called by cortex_server internally)
 ```json
 {
   "connection": {"connected": true},

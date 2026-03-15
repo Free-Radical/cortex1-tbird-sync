@@ -20,7 +20,7 @@ The extension connects to cortex_server automatically on startup. The "Cortex1 S
 
 ## How It Works
 
-The extension communicates with cortex_server using **WebSocket** (real-time, primary) with **HTTP polling** as automatic fallback.
+The extension communicates with cortex_server using **WebSocket** (real-time, sole transport for commands).
 
 **Supported operations:** mark read/unread, flag, archive, move, delete, open message, create/send reply drafts, and generic RPC calls into Thunderbird's WebExtension APIs.
 
@@ -56,7 +56,7 @@ See [TESTING.md](TESTING.md) for test tiers, coverage thresholds, and pre-commit
 
 ## API Reference
 
-For the full WebSocket/HTTP protocol, supported actions, RPC contracts, and server endpoint specifications, see [DEVELOPER.md](DEVELOPER.md).
+For the full WebSocket protocol, supported actions, RPC contracts, and server endpoint specifications, see [DEVELOPER.md](DEVELOPER.md).
 
 ## License
 

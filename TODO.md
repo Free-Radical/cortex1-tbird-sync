@@ -9,7 +9,7 @@
 - [ ] `forwarded` and `replied` status not available via Thunderbird WebExtension API — only readable from X-Mozilla-Status headers in mbox files (may be stale until folder compact)
 
 ## Done
-- [x] WebSocket IPC (primary) with HTTP polling fallback
+- [x] WebSocket IPC (sole transport for commands)
 - [x] Real-time ingest: event + polling (monitorAllFolders)
 - [x] Toolbar button in main toolbar by default
 - [x] Recency/backlog gate fixes (monitorAllFolders forwarding, DB-fresh counts)
