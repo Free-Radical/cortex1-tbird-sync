@@ -767,6 +767,24 @@ async function setFlagged(messageId, flagged) {
 }
 
 /**
+ * Set junk status
+ */
+async function setJunk(messageId, junk) {
+    const message = await findMessageByHeaderId(messageId);
+    if (!message) {
+        return { success: false, error: "Message not found", messageId };
+    }
+    try {
+        await messenger.messages.update(message.id, { junk: junk });
+        // Re-fetch message to get updated state
+        const updatedMessage = await messenger.messages.get(message.id);
+        return { success: true, messageId, action: "set_junk", junk, tb_state: buildTbState(updatedMessage) };
+    } catch (error) {
+        return { success: false, error: error.message, messageId };
+    }
+}
+
+/**
  * Open/display a message in a new Thunderbird window
  */
 async function openMessage(messageId) {
@@ -2441,6 +2459,8 @@ async function processCommand(cmd) {
             return await markAsUnread(cmd.messageId);
         case "set_flagged":
             return await setFlagged(cmd.messageId, cmd.flagged !== false);
+        case "set_junk":
+            return await setJunk(cmd.messageId, cmd.junk === true);
         case "open_message":
             return await openMessage(cmd.messageId);
         // Batch operations

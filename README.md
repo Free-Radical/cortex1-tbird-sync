@@ -22,7 +22,7 @@ The extension connects to cortex_server automatically on startup. The "Cortex1 S
 
 The extension communicates with cortex_server using **WebSocket** (real-time, sole transport for commands).
 
-**Supported operations:** mark read/unread, flag, archive, move, delete, open message, create/send reply drafts, and generic RPC calls into Thunderbird's WebExtension APIs.
+**Supported operations:** mark read/unread, flag, junk, archive, move, delete, open message, create/send reply drafts, and generic RPC calls into Thunderbird's WebExtension APIs.
 
 **Real-time ingest:** New mail is detected via `messages.onNewMailReceived` (with inbox polling as bounded-delay fallback).
 

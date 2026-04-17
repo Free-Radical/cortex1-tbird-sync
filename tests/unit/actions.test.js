@@ -2,7 +2,7 @@
  * Unit Tests for Action Handlers
  *
  * Tests all action handlers in processCommand() switch statement:
- * mark_read, mark_unread, set_flagged, open_message, archive,
+ * mark_read, mark_unread, set_flagged, set_junk, open_message, archive,
  * move, bulk_mark_read, create_draft, send_reply, get_status,
  * bulk_get_status, list_folders, rpc, backfill_replied_forwarded,
  * set_tags, sync_state, bulk_sync_state
@@ -191,6 +191,55 @@ describe("Action Handlers", () => {
 
             expect(result.tb_state).toBeDefined();
             expect(result.tb_state.flagged).toBe(true);
+        });
+    });
+
+    // =========================================================================
+    // set_junk
+    // =========================================================================
+    describe("set_junk action", () => {
+        it("should set junk to true", async () => {
+            const updatedMsg = { ...mockMsg, junk: true };
+            messenger.messages.get.mockResolvedValue(updatedMsg);
+
+            const result = await bg.processCommand({
+                action: "set_junk",
+                messageId: "test-msg-id@example.com",
+                junk: true
+            });
+
+            expect(result.success).toBe(true);
+            expect(result.action).toBe("set_junk");
+            expect(result.junk).toBe(true);
+            expect(messenger.messages.update).toHaveBeenCalledWith(mockMsg.id, { junk: true });
+        });
+
+        it("should default junk to false when not specified", async () => {
+            const updatedMsg = { ...mockMsg, junk: false };
+            messenger.messages.get.mockResolvedValue(updatedMsg);
+
+            const result = await bg.processCommand({
+                action: "set_junk",
+                messageId: "test-msg-id@example.com"
+            });
+
+            expect(result.success).toBe(true);
+            expect(result.junk).toBe(false);
+            expect(messenger.messages.update).toHaveBeenCalledWith(mockMsg.id, { junk: false });
+        });
+
+        it("should include tb_state with junk status", async () => {
+            const updatedMsg = { ...mockMsg, junk: true };
+            messenger.messages.get.mockResolvedValue(updatedMsg);
+
+            const result = await bg.processCommand({
+                action: "set_junk",
+                messageId: "test-msg-id@example.com",
+                junk: true
+            });
+
+            expect(result.tb_state).toBeDefined();
+            expect(result.tb_state.junk).toBe(true);
         });
     });
 
