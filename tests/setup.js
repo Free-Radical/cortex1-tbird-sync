@@ -316,6 +316,8 @@ module.exports = {
 
                 // Command processing
                 processCommand,
+                executeCommandWithTimeout,
+                ensureValidCommandResult,
                 enqueueCommands,
                 runWorkerLoop,
 

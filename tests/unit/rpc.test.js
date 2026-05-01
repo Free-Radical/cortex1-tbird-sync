@@ -654,5 +654,35 @@ describe("RPC Method Execution", () => {
 
             expect(result.success).toBe(true);
         });
+
+        it("should support messages.tags.list as an alias for messages.listTags", async () => {
+            messenger.messages.tags.list.mockResolvedValue([{ key: "$label1", tag: "Important" }]);
+
+            const result = await bg.executeRpcCommand({
+                method: "messages.tags.list",
+                args: []
+            });
+
+            expect(result.success).toBe(true);
+            expect(result.method).toBe("messages.tags.list");
+            expect(result.result).toEqual([{ key: "$label1", tag: "Important" }]);
+            expect(messenger.messages.tags.list).toHaveBeenCalledTimes(1);
+        });
+
+        it("should preserve rpc method on timeout results", async () => {
+            const result = bg.ensureValidCommandResult({
+                id: "timeout-1",
+                action: "rpc",
+                method: "messages.tags.list",
+                args: []
+            }, {
+                success: false,
+                error: "Timeout after 30000ms"
+            });
+
+            expect(result.success).toBe(false);
+            expect(result.error).toBe("Timeout after 30000ms");
+            expect(result.method).toBe("messages.tags.list");
+        });
     });
 });

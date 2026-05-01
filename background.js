@@ -1812,6 +1812,18 @@ async function executeRpcCommand(cmd) {
         let result;
         if (method.startsWith("cortex.")) {
             result = await cortexRpc(method, args);
+        } else if (method === "messages.tags.list") {
+            if (messenger.messages && typeof messenger.messages.listTags === "function") {
+                result = await messenger.messages.listTags();
+            } else if (
+                messenger.messages &&
+                messenger.messages.tags &&
+                typeof messenger.messages.tags.list === "function"
+            ) {
+                result = await messenger.messages.tags.list();
+            } else {
+                throw new Error("Unknown method: messages.tags.list");
+            }
         } else if (method === "messages.query") {
             const original = (args[0] && typeof args[0] === "object") ? args[0] : {};
             const queryInfo = { ...original };
@@ -2896,6 +2908,9 @@ function ensureValidCommandResult(cmd, result, errorMessage) {
     }
     out.id = cmd && cmd.id != null ? cmd.id : (cmd && cmd.command_id != null ? cmd.command_id : out.id);
     out.action = cmd && cmd.action != null ? cmd.action : out.action;
+    if (out.method == null && cmd && cmd.action === "rpc" && cmd.method != null) {
+        out.method = cmd.method;
+    }
     return out;
 }
 
@@ -3323,6 +3338,7 @@ if (typeof module !== "undefined" && module && module.exports) {
 
         // Command processing
         processCommand,
+        executeCommandWithTimeout,
         enqueueCommands,
         runWorkerLoop,
 
