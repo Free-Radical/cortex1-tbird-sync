@@ -5,7 +5,7 @@
  * No native messaging required - just install the .xpi.
  */
 
-const DEFAULT_CORTEX_SERVER = "http://localhost:5001";
+const DEFAULT_CORTEX_SERVER = "http://127.0.0.1:5001";
 const CORTEX_SERVER_STORAGE_KEY = "cortex_server_url";
 // HTTP polling removed — WebSocket is the sole IPC transport.
 // POLL_INTERVAL_MS retained only for completion-flush retry cadence.
@@ -35,6 +35,23 @@ let isFlushingEvents = false;
 
 let cachedCortexServerUrl = null;
 let hasLoadedCortexServerUrl = false;
+
+function normalizeLoopbackServerUrl(value) {
+    const raw = String(value || "").trim();
+    if (!raw) return DEFAULT_CORTEX_SERVER;
+    try {
+        const parsed = new URL(raw);
+        if (parsed.hostname === "localhost") {
+            parsed.hostname = "127.0.0.1";
+            return parsed.toString().replace(/\/$/, "");
+        }
+        return parsed.toString().replace(/\/$/, "");
+    } catch (error) {
+        return raw.replace(/^http:\/\/localhost(?=[:/]|$)/i, "http://127.0.0.1")
+            .replace(/^https:\/\/localhost(?=[:/]|$)/i, "https://127.0.0.1")
+            .replace(/\/$/, "");
+    }
+}
 
 // =============================================================================
 // Debug Logging + Failure Tracking
@@ -169,13 +186,15 @@ function getExtensionVersion() {
 
 async function getCortexServerUrl() {
     if (hasLoadedCortexServerUrl) {
-        return cachedCortexServerUrl || DEFAULT_CORTEX_SERVER;
+        return normalizeLoopbackServerUrl(cachedCortexServerUrl || DEFAULT_CORTEX_SERVER);
     }
 
     try {
         const stored = await messenger.storage.local.get(CORTEX_SERVER_STORAGE_KEY);
         const value = stored && stored[CORTEX_SERVER_STORAGE_KEY];
-        cachedCortexServerUrl = (typeof value === "string" && value.trim()) ? value.trim() : DEFAULT_CORTEX_SERVER;
+        cachedCortexServerUrl = normalizeLoopbackServerUrl(
+            (typeof value === "string" && value.trim()) ? value.trim() : DEFAULT_CORTEX_SERVER
+        );
     } catch (error) {
         cachedCortexServerUrl = DEFAULT_CORTEX_SERVER;
     } finally {
@@ -2566,7 +2585,7 @@ function isWebSocketOpen() {
 }
 
 async function getWebSocketUrl() {
-    const baseUrl = await getCortexServerUrl();
+    const baseUrl = normalizeLoopbackServerUrl(await getCortexServerUrl());
     try {
         const parsed = new URL(baseUrl);
         const protocol = parsed.protocol === "https:" ? "wss:" : "ws:";

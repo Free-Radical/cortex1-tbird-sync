@@ -140,7 +140,7 @@ const createMockMessenger = () => {
         },
         storage: mockStorage,
         runtime: {
-            getManifest: jest.fn(() => ({ version: "1.6.6" })),
+            getManifest: jest.fn(() => ({ version: "1.6.7" })),
             id: "cortex1-tbird-sync@example.com"
         },
         downloads: {
@@ -331,6 +331,9 @@ module.exports = {
                 // WebSocket (sole IPC transport)
                 isWebSocketOpen,
                 sendWebSocketMessage,
+                getCortexServerUrl,
+                getWebSocketUrl,
+                normalizeLoopbackServerUrl,
                 _setWs: function(mockWs) { ws = mockWs; },
 
                 // Debug logger
