@@ -226,7 +226,7 @@ def check_backfill_reports_sent_folders() -> CheckResult:
 
     Regression check: earlier versions depended on `folder.id` and discovered 0 sent folders.
     """
-    queue_result = api_post("/scan-sent-folder?days_back=365&limit=10", {})
+    queue_result = api_post("/scan-sent-folder?days_back=14&limit=10", {})
     if queue_result is None or queue_result.get("status") != "queued":
         return CheckResult("backfill_sent_folders", False, "Failed to queue scan-sent-folder", skippable=True)
 
