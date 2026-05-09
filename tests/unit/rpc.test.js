@@ -588,6 +588,135 @@ describe("RPC Method Execution", () => {
         });
     });
 
+    describe("critical cortex aggregate RPCs", () => {
+        it("cortex.getInboxCounts uses live folder info per account", async () => {
+            messenger.accounts.list.mockResolvedValue([
+                createMockAccount({
+                    id: "account1",
+                    name: "Primary",
+                    folders: [
+                        createMockFolder({
+                            accountId: "account1",
+                            path: "/INBOX",
+                            specialUse: ["inbox"],
+                        }),
+                    ],
+                }),
+            ]);
+            messenger.folders.getFolderInfo.mockResolvedValue({
+                totalMessageCount: 42,
+                unreadMessageCount: 7,
+            });
+
+            const result = await bg.executeRpcCommand({
+                method: "cortex.getInboxCounts",
+                args: [],
+            });
+
+            expect(result.success).toBe(true);
+            expect(result.result.account1.totalMessageCount).toBe(42);
+            expect(result.result.account1.unreadMessageCount).toBe(7);
+            expect(result.result.account1.method).toBe("getFolderInfo");
+            expect(messenger.folders.getFolderInfo).toHaveBeenCalledTimes(1);
+        });
+
+        it("cortex.getInboxCounts falls back to paginated messages.list", async () => {
+            messenger.accounts.list.mockResolvedValue([
+                createMockAccount({
+                    id: "account1",
+                    folders: [
+                        createMockFolder({
+                            accountId: "account1",
+                            path: "/INBOX",
+                            specialUse: ["inbox"],
+                        }),
+                    ],
+                }),
+            ]);
+            messenger.folders.getFolderInfo.mockRejectedValue(new Error("folder info unavailable"));
+            messenger.messages.list.mockResolvedValue({
+                id: "page-2",
+                messages: [
+                    createMockMessage({ id: 1, read: false }),
+                    createMockMessage({ id: 2, read: true }),
+                ],
+            });
+            messenger.messages.continueList.mockResolvedValueOnce({
+                id: null,
+                messages: [createMockMessage({ id: 3, read: false })],
+            });
+
+            const result = await bg.executeRpcCommand({
+                method: "cortex.getInboxCounts",
+                args: [],
+            });
+
+            expect(result.success).toBe(true);
+            expect(result.result.account1.totalMessageCount).toBe(3);
+            expect(result.result.account1.unreadMessageCount).toBe(2);
+            expect(result.result.account1.method).toBe("messages.list(2pg)");
+            expect(messenger.messages.continueList).toHaveBeenCalledWith("page-2");
+        });
+
+        it("cortex.getNewestInboxMessageByAccount samples newest inbox dates per account", async () => {
+            messenger.accounts.list.mockResolvedValue([
+                createMockAccount({
+                    id: "account1",
+                    name: "Primary",
+                    folders: [
+                        createMockFolder({
+                            accountId: "account1",
+                            path: "/INBOX",
+                            specialUse: ["inbox"],
+                        }),
+                    ],
+                }),
+            ]);
+            messenger.messages.list.mockResolvedValue({
+                id: null,
+                messages: [
+                    createMockMessage({ id: 1, date: new Date("2026-01-01T00:00:00.000Z") }),
+                    createMockMessage({ id: 2, date: new Date("2026-01-03T00:00:00.000Z") }),
+                ],
+            });
+
+            const result = await bg.executeRpcCommand({
+                method: "cortex.getNewestInboxMessageByAccount",
+                args: [],
+            });
+
+            expect(result.success).toBe(true);
+            expect(result.result.account1.newestDate).toBe("2026-01-03T00:00:00.000Z");
+            expect(result.result.account1.sampled).toBe(2);
+        });
+
+        it("cortex.messages.getFullByHeaderId returns full body plus current state", async () => {
+            const message = createMockMessage({
+                id: 9876,
+                headerMessageId: "full-body@example.com",
+                read: true,
+                flagged: true,
+            });
+            messenger.messages.query.mockResolvedValue({ messages: [message] });
+            messenger.messages.getFull.mockResolvedValue({
+                headers: { subject: ["Full Body"] },
+                body: "hello",
+            });
+
+            const result = await bg.executeRpcCommand({
+                method: "cortex.messages.getFullByHeaderId",
+                args: ["full-body@example.com"],
+            });
+
+            expect(result.success).toBe(true);
+            expect(result.result.headerMessageId).toBe("full-body@example.com");
+            expect(result.result.messageId).toBe(9876);
+            expect(result.result.full.body).toBe("hello");
+            expect(result.result.state.read).toBe(true);
+            expect(result.result.state.flagged).toBe(true);
+        });
+    });
+
     // =========================================================================
     // sanitizeRpcResult
     // =========================================================================

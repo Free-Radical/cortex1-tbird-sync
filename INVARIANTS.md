@@ -35,6 +35,7 @@ KEEP THIS FILE CURRENT. These are hard rules for `cortex1-tbird-sync`.
 - Primary and required IPC path: WebSocket.
 - Connection backoff must remain bounded (exponential with max delay cap).
 - Completion batching must not block command intake.
+- Preserve LAN/remote Cortex server URLs when building the WebSocket URL. Only literal loopback hosts may be normalized; `http(s)://192.168.x.x`, LAN hostnames, and remote hosts must remain reachable as `ws(s)://.../tbird-sync/ws`.
 
 ---
 

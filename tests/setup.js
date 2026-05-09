@@ -112,6 +112,7 @@ const createMockMessenger = () => {
         },
         folders: {
             get: jest.fn(),
+            getFolderInfo: jest.fn(),
             query: jest.fn(),
             create: jest.fn(),
             rename: jest.fn(),
@@ -200,6 +201,13 @@ beforeEach(() => {
     // Mock fetch
     global.fetch = jest.fn();
 
+    // Node test environments may not provide WebSocket. Individual transport
+    // tests can still replace this with a constructor when they need lifecycle
+    // coverage.
+    if (!global.WebSocket) {
+        global.WebSocket = { OPEN: 1, CONNECTING: 0, CLOSING: 2, CLOSED: 3 };
+    }
+
     // Mock console methods
     global.console = {
         ...console,
@@ -236,148 +244,9 @@ module.exports = {
 
     // Helper to load background.js functions
     loadBackgroundScript: () => {
-        // Clear module cache to get fresh instance
+        // Clear Jest's module registry so background.js state is fresh and coverage-instrumented.
+        jest.resetModules();
         delete require.cache[require.resolve("../background.js")];
-
-        // We need to extract functions from background.js
-        // Since it's not a module, we'll read and eval it
-        const fs = require("fs");
-        const path = require("path");
-        const scriptPath = path.join(__dirname, "..", "background.js");
-        const scriptContent = fs.readFileSync(scriptPath, "utf8");
-
-        // Create a sandbox to execute the script
-        const sandbox = {
-            messenger: global.messenger,
-            fetch: global.fetch,
-            console: global.console,
-            crypto: global.crypto,
-            Date: global.Date,
-            setTimeout: global.setTimeout,
-            setInterval: global.setInterval,
-            clearTimeout: global.clearTimeout,
-            clearInterval: global.clearInterval,
-            Math: global.Math,
-            JSON: global.JSON,
-            Array: global.Array,
-            Object: global.Object,
-            String: global.String,
-            Number: global.Number,
-            Boolean: global.Boolean,
-            Error: global.Error,
-            Promise: global.Promise,
-            Map: global.Map,
-            Set: global.Set,
-            AbortController: global.AbortController,
-            AbortSignal: global.AbortSignal,
-            WebSocket: { OPEN: 1, CONNECTING: 0, CLOSING: 2, CLOSED: 3 },
-            CORTEX_TEST_MODE: global.CORTEX_TEST_MODE,
-            // Pre-create __exports__ so it's accessible after vm.runInContext
-            __exports__: {}
-        };
-
-        // Execute script and capture exported functions
-        const vm = require("vm");
-        const context = vm.createContext(sandbox);
-
-        // Wrap script to expose functions
-        const wrappedScript = `
-            ${scriptContent}
-
-            // Export functions for testing (assign to pre-created __exports__ object)
-            Object.assign(__exports__, {
-                // Helper functions
-                minifyMessageHeader,
-                minifyFolder,
-                buildTbState,
-                findMessageByHeaderId,
-                findFolder,
-
-                // Action handlers
-                markAsRead,
-                markAsUnread,
-                setFlagged,
-                openMessage,
-                archiveMessages,
-                moveMessages,
-                bulkMarkRead,
-                createReplyDraft,
-                sendReply,
-                getMessageStatus,
-                bulkGetStatus,
-                listFolders,
-
-                // RPC
-                executeRpcCommand,
-                cortexRpc,
-                isAllowedRpcMethodPath,
-                getRpcFunctionByPath,
-                sanitizeRpcResult,
-
-                // Command processing
-                processCommand,
-                executeCommandWithTimeout,
-                ensureValidCommandResult,
-                enqueueCommands,
-                runWorkerLoop,
-
-                // Event system
-                enqueueEvent,
-                flushEventQueue,
-                postEventBatch,
-                ensureEventQueueLoaded,
-                pollForNewEmails,
-
-                // WebSocket (sole IPC transport)
-                isWebSocketOpen,
-                sendWebSocketMessage,
-                getCortexServerUrl,
-                getWebSocketUrl,
-                normalizeLoopbackServerUrl,
-                _setWs: function(mockWs) { ws = mockWs; },
-
-                // Debug logger
-                DebugLogger,
-                FailureTracker,
-                exportDiagnostics,
-                buildDiagnosticsPayload,
-
-                // Tag handling
-                handleSetTags,
-
-                // Backfill
-                handleBackfillRepliedForwarded,
-
-                // Cancel
-                cancelledJobIds,
-                pruneCancelledJobIds,
-                removeQueuedCommandsForJob,
-                CANCEL_TTL_MS,
-                CANCEL_MAX_SIZE,
-
-                // Queues (test access)
-                highCommandQueue,
-                fastCommandQueue,
-                slowCommandQueue,
-                knownCommandIds,
-
-                // Indicator
-                setIndicator,
-                getQueueDepth,
-                ACT,
-
-                // Constants
-                DEFAULT_CORTEX_SERVER,
-                POLL_INTERVAL_MS,
-                EVENT_QUEUE_LIMIT,
-                EVENT_BATCH_SIZE,
-                DEBUG_MAX_ENTRIES,
-                FAILURE_MAX_ENTRIES
-            });
-        `;
-
-        vm.runInContext(wrappedScript, context);
-
-        return context.__exports__;
+        return require("../background.js");
     }
 };

@@ -453,8 +453,7 @@ describe("Load Tests with Stub Server", () => {
             }
         }, 10000);
 
-        // TODO: This test times out when run in isolation - investigate later
-        it.skip("should receive results via WebSocket", async () => {
+        it("should receive results via WebSocket", async () => {
             let ws;
             try {
                 console.log("[TEST] Connecting WS for result test...");
@@ -472,9 +471,6 @@ describe("Load Tests with Stub Server", () => {
                 const cmdId = cmdResp.data.command.id;
                 console.log("[TEST] Command added:", cmdId);
 
-                // Wait for command to be pushed to us (drain any pending messages)
-                await new Promise(resolve => setTimeout(resolve, 200));
-
                 // Send result via WS
                 console.log("[TEST] Sending result...");
                 ws.send(JSON.stringify({
@@ -488,11 +484,15 @@ describe("Load Tests with Stub Server", () => {
                 }));
 
                 // Wait for processing
-                await new Promise(resolve => setTimeout(resolve, 200));
+                const deadline = Date.now() + 3000;
+                let stats = await request("GET", "/test/stats");
+                while (stats.data.commandsCompleted === 0 && Date.now() < deadline) {
+                    await new Promise(resolve => setTimeout(resolve, 50));
+                    stats = await request("GET", "/test/stats");
+                }
 
                 // Verify result was received
                 console.log("[TEST] Checking stats...");
-                const stats = await request("GET", "/test/stats");
                 console.log("[TEST] Stats:", JSON.stringify(stats.data));
                 expect(stats.data.commandsCompleted).toBeGreaterThan(0);
             } finally {

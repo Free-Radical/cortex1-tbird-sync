@@ -39,6 +39,7 @@ Expected runtime: ~5-20s.
 
 - Extension behavior against `tests/stub_server.js`
 - WebSocket command/result flows
+- LAN/remote Cortex URL preservation is covered by unit transport tests; `cortex_server_url` may point at a local-LAN host and must convert to `ws(s)://.../tbird-sync/ws` without being forced back to loopback.
 
 Run:
 

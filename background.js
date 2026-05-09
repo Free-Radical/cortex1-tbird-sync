@@ -3358,6 +3358,7 @@ if (typeof module !== "undefined" && module && module.exports) {
         // Command processing
         processCommand,
         executeCommandWithTimeout,
+        ensureValidCommandResult,
         enqueueCommands,
         runWorkerLoop,
 
@@ -3371,7 +3372,15 @@ if (typeof module !== "undefined" && module && module.exports) {
         // WebSocket (sole IPC transport)
         isWebSocketOpen,
         sendWebSocketMessage,
+        connectWebSocket,
+        scheduleReconnect,
+        getCortexServerUrl,
+        getWebSocketUrl,
+        normalizeLoopbackServerUrl,
         _setWs: function(mockWs) { ws = mockWs; },
+        _getWs: function() { return ws; },
+        _getConnectionState: function() { return connectionState; },
+        _getReconnectAttempts: function() { return wsReconnectAttempts; },
 
         // Diagnostics
         DebugLogger,
