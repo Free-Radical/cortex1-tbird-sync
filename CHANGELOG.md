@@ -1,6 +1,9 @@
 # Changelog
 
 ## Unreleased
+- Backfill scans now run on a dedicated slow lane so high-priority RPCs such as
+  `accounts.list` and `cancel_job` can complete while a long scan is still
+  running.
 
 ## 1.6.6 - 2026-02-16
 - Real-time ingest now event + polling. `messages.onNewMailReceived` remains primary and inbox polling remains the bounded-delay fallback.

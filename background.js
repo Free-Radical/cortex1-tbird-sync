@@ -2833,6 +2833,7 @@ const fastCommandQueue = [];
 const slowCommandQueue = [];
 
 let commandWorkerRunning = false;
+let slowCommandWorkerRunning = false;
 
 const inFlightCommands = new Map(); // id -> { action, startedAt, lane }
 
@@ -3009,12 +3010,13 @@ async function executeCommandWithTimeout(cmd) {
 
 function startWorkers() {
     startCommandWorker();
+    startSlowCommandWorker();
     scheduleCompletionFlush(0);
 }
 
 function startCommandWorker() {
     if (commandWorkerRunning) return;
-    if (highCommandQueue.length === 0 && fastCommandQueue.length === 0 && slowCommandQueue.length === 0) return;
+    if (highCommandQueue.length === 0 && fastCommandQueue.length === 0) return;
     commandWorkerRunning = true;
     runWorkerLoop().catch(() => {}).finally(() => { commandWorkerRunning = false; startCommandWorker(); });
 }
@@ -3022,11 +3024,25 @@ function startCommandWorker() {
 function shiftNextCommand() {
     if (highCommandQueue.length > 0) return highCommandQueue.shift();
     if (fastCommandQueue.length > 0) return fastCommandQueue.shift();
+    return null;
+}
+
+function shiftNextSlowCommand() {
     if (slowCommandQueue.length > 0) return slowCommandQueue.shift();
     return null;
 }
 
+async function reportCommandCompletion(result) {
+    completionQueue.push(result);
+    if (IS_TEST_MODE) {
+        await flushCompletions();
+    } else {
+        scheduleCompletionFlush(0);
+    }
+}
+
 async function runWorkerLoop() {
+    startSlowCommandWorker();
     while (true) {
         const cmd = shiftNextCommand();
         if (!cmd) break;
@@ -3034,15 +3050,39 @@ async function runWorkerLoop() {
         const depth = getQueueDepth();
         setIndicator({ connected: connectionState === "CONNECTED", busy: depth > 0, queueDepth: depth });
         const res = await executeCommandWithTimeout(cmd);
-        completionQueue.push(res);
-        if (IS_TEST_MODE) {
-            await flushCompletions();
-        } else {
-            scheduleCompletionFlush(0);
-        }
+        await reportCommandCompletion(res);
     }
-    // Queue drained — update indicator to idle (or disconnected)
-    setIndicator({ connected: connectionState === "CONNECTED", queueDepth: 0 });
+    startSlowCommandWorker();
+    const depth = getQueueDepth();
+    // Foreground queue drained — slow work may still be queued/running.
+    setIndicator({ connected: connectionState === "CONNECTED", busy: depth > 0, queueDepth: depth });
+}
+
+function startSlowCommandWorker() {
+    if (slowCommandWorkerRunning) return;
+    if (slowCommandQueue.length === 0) return;
+    slowCommandWorkerRunning = true;
+    runSlowWorkerLoop().catch(() => {}).finally(() => {
+        slowCommandWorkerRunning = false;
+        if (slowCommandQueue.length > 0) {
+            startSlowCommandWorker();
+            return;
+        }
+        const depth = getQueueDepth();
+        setIndicator({ connected: connectionState === "CONNECTED", busy: depth > 0, queueDepth: depth });
+    });
+}
+
+async function runSlowWorkerLoop() {
+    while (true) {
+        const cmd = shiftNextSlowCommand();
+        if (!cmd) break;
+        if (!cmd) continue;
+        const depth = getQueueDepth();
+        setIndicator({ connected: connectionState === "CONNECTED", busy: true, queueDepth: depth });
+        const res = await executeCommandWithTimeout(cmd);
+        await reportCommandCompletion(res);
+    }
 }
 
 function scheduleCompletionFlush(delayMs) {
