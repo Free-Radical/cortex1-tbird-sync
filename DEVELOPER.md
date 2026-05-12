@@ -85,6 +85,7 @@ Bidirectional WebSocket for real-time communication.
 | Action | Description |
 |--------|-------------|
 | `archive` | Archive messages (requires `messageIds` array) |
+| `delete` | Delete messages to Trash by default (requires `messageIds`; `skipTrash: true` is explicit permanent delete) |
 | `move` | Move messages to folder (requires `messageIds`, `folder`) |
 | `bulk_mark_read` | Mark multiple messages as read (requires `messageIds`) |
 | `bulk_get_status` | Get status of multiple messages (requires `messageIds`) |

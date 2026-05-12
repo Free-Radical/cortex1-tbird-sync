@@ -884,6 +884,58 @@ async function archiveMessages(messageIds) {
 }
 
 /**
+ * Delete messages by Message-ID header (batch support).
+ *
+ * By default this uses Thunderbird's normal delete behavior and moves messages
+ * to Trash. `skipTrash=true` is reserved for explicit RPC/permanent-delete
+ * callers and should not be used by the normal c1server triage queue.
+ */
+async function deleteMessages(messageIds, skipTrash = false) {
+    const results = { success: [], failed: [] };
+    const tbIds = [];
+    const tbIdToHeaderId = new Map();
+
+    for (const msgId of messageIds) {
+        const message = await findMessageByHeaderId(msgId);
+        if (message) {
+            tbIds.push(message.id);
+            tbIdToHeaderId.set(message.id, msgId);
+            results.success.push(msgId);
+        } else {
+            results.failed.push({ messageId: msgId, error: "Message not found" });
+        }
+    }
+
+    const tbStates = [];
+
+    if (tbIds.length > 0) {
+        try {
+            await messenger.messages.delete(tbIds, skipTrash === true);
+            for (const tbId of tbIds) {
+                tbStates.push({
+                    messageId: tbIdToHeaderId.get(tbId),
+                    tb_state: null
+                });
+            }
+        } catch (error) {
+            results.failed.push(...results.success.map(id => ({ messageId: id, error: error.message })));
+            results.success = [];
+            tbStates.length = 0;
+        }
+    }
+
+    return {
+        success: results.failed.length === 0,
+        action: "delete",
+        deleted: results.success,
+        failed: results.failed,
+        count: results.success.length,
+        skipTrash: skipTrash === true,
+        tb_states: tbStates
+    };
+}
+
+/**
  * Move messages to a folder (batch support)
  */
 async function moveMessages(messageIds, folderPath) {
@@ -2497,6 +2549,8 @@ async function processCommand(cmd) {
         // Batch operations
         case "archive":
             return await archiveMessages(cmd.messageIds || [cmd.messageId]);
+        case "delete":
+            return await deleteMessages(cmd.messageIds || [cmd.messageId], cmd.skipTrash === true);
         case "move":
             return await moveMessages(cmd.messageIds || [cmd.messageId], cmd.folder);
         case "bulk_mark_read":
@@ -3380,6 +3434,7 @@ if (typeof module !== "undefined" && module && module.exports) {
         setFlagged,
         openMessage,
         archiveMessages,
+        deleteMessages,
         moveMessages,
         bulkMarkRead,
         createReplyDraft,

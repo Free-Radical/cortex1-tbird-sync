@@ -3,12 +3,12 @@
 ## Improvements
 - [ ] Reduce/structure noisy logs — categorize + rate-limit repeated errors (e.g., connection refused), bounded ring buffer with "dropped N entries" counters
 - [ ] Make logging paths explicit on server side — document `CORTEX_RPC_LOG_PATH`, optionally support posting extension logs to server for centralized troubleshooting
-- [ ] Add `delete` single-message action (currently only batch delete via `move`)
 
 ## Known Limitations
 - [ ] `forwarded` and `replied` status not available via Thunderbird WebExtension API — only readable from X-Mozilla-Status headers in mbox files (may be stale until folder compact)
 
 ## Done
+- [x] Add queued `delete` command support for single and batch c1server actions
 - [x] WebSocket IPC (sole transport for commands)
 - [x] Real-time ingest: event + polling (monitorAllFolders)
 - [x] Toolbar button in main toolbar by default

@@ -2,7 +2,7 @@
  * Unit Tests for Action Handlers
  *
  * Tests all action handlers in processCommand() switch statement:
- * mark_read, mark_unread, set_flagged, set_junk, open_message, archive,
+ * mark_read, mark_unread, set_flagged, set_junk, open_message, archive, delete,
  * move, bulk_mark_read, create_draft, send_reply, get_status,
  * bulk_get_status, list_folders, rpc, backfill_replied_forwarded,
  * set_tags, sync_state, bulk_sync_state
@@ -350,6 +350,90 @@ describe("Action Handlers", () => {
             expect(result.archived).toContain("test-msg-id@example.com");
             expect(result.failed.length).toBe(1);
             expect(result.failed[0].messageId).toBe("nonexistent@example.com");
+        });
+    });
+
+    // =========================================================================
+    // delete
+    // =========================================================================
+    describe("delete action", () => {
+        it("should delete single message to Trash by default", async () => {
+            const result = await bg.processCommand({
+                action: "delete",
+                messageId: "test-msg-id@example.com"
+            });
+
+            expect(result.success).toBe(true);
+            expect(result.action).toBe("delete");
+            expect(result.deleted).toContain("test-msg-id@example.com");
+            expect(result.count).toBe(1);
+            expect(result.skipTrash).toBe(false);
+            expect(result.tb_states).toEqual([
+                { messageId: "test-msg-id@example.com", tb_state: null }
+            ]);
+            expect(messenger.messages.delete).toHaveBeenCalledWith([mockMsg.id], false);
+        });
+
+        it("should delete multiple messages", async () => {
+            const msg2 = createMockMessage({ id: 12346, headerMessageId: "msg2@example.com" });
+            messenger.messages.query
+                .mockResolvedValueOnce({ messages: [mockMsg] })
+                .mockResolvedValueOnce({ messages: [msg2] });
+
+            const result = await bg.processCommand({
+                action: "delete",
+                messageIds: ["test-msg-id@example.com", "msg2@example.com"]
+            });
+
+            expect(result.success).toBe(true);
+            expect(result.deleted).toEqual(["test-msg-id@example.com", "msg2@example.com"]);
+            expect(result.count).toBe(2);
+            expect(messenger.messages.delete).toHaveBeenCalledWith([mockMsg.id, msg2.id], false);
+        });
+
+        it("should support explicit permanent delete only when skipTrash is true", async () => {
+            const result = await bg.processCommand({
+                action: "delete",
+                messageId: "test-msg-id@example.com",
+                skipTrash: true
+            });
+
+            expect(result.success).toBe(true);
+            expect(result.skipTrash).toBe(true);
+            expect(messenger.messages.delete).toHaveBeenCalledWith([mockMsg.id], true);
+        });
+
+        it("should handle partial failures without reporting unknown action", async () => {
+            messenger.messages.query
+                .mockResolvedValueOnce({ messages: [mockMsg] })
+                .mockResolvedValueOnce({ messages: [] });
+
+            const result = await bg.processCommand({
+                action: "delete",
+                messageIds: ["test-msg-id@example.com", "nonexistent@example.com"]
+            });
+
+            expect(result.action).toBe("delete");
+            expect(result.error || "").not.toContain("Unknown action");
+            expect(result.deleted).toContain("test-msg-id@example.com");
+            expect(result.failed).toEqual([
+                { messageId: "nonexistent@example.com", error: "Message not found" }
+            ]);
+        });
+
+        it("should return API errors as delete failures", async () => {
+            messenger.messages.delete.mockRejectedValue(new Error("Delete failed"));
+
+            const result = await bg.processCommand({
+                action: "delete",
+                messageId: "test-msg-id@example.com"
+            });
+
+            expect(result.success).toBe(false);
+            expect(result.action).toBe("delete");
+            expect(result.failed).toEqual([
+                { messageId: "test-msg-id@example.com", error: "Delete failed" }
+            ]);
         });
     });
 
