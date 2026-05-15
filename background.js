@@ -391,9 +391,261 @@ function minifyFolder(folder) {
     };
 }
 
+const TBIRD_SYNC_STATE_AUDIT_SCHEMA_VERSION = "1.0";
+
+const TBIRD_MESSAGE_HEADER_FIELDS = [
+    "author",
+    "bccList",
+    "ccList",
+    "date",
+    "external",
+    "flagged",
+    "folder",
+    "headerMessageId",
+    "headersOnly",
+    "id",
+    "junk",
+    "junkScore",
+    "new",
+    "priority",
+    "recipients",
+    "read",
+    "size",
+    "subject",
+    "tags"
+];
+
+const TBIRD_MESSAGE_PART_FIELDS = [
+    "body",
+    "contentType",
+    "decryptionStatus",
+    "headers",
+    "name",
+    "partName",
+    "parts",
+    "rawBody",
+    "rawHeaders",
+    "size"
+];
+
+const TBIRD_ATTACHMENT_FIELDS = [
+    "contentDisposition",
+    "contentType",
+    "headers",
+    "name",
+    "partName",
+    "size",
+    "contentId",
+    "message"
+];
+
+const TBIRD_FOLDER_FIELDS = [
+    "path",
+    "accountId",
+    "id",
+    "isFavorite",
+    "isRoot",
+    "isTag",
+    "isUnified",
+    "isVirtual",
+    "name",
+    "specialUse",
+    "subFolders",
+    "type"
+];
+
+const TBIRD_FOLDER_INFO_FIELDS = [
+    "favorite",
+    "lastUsed",
+    "lastUsedAsDestination",
+    "newMessageCount",
+    "quota",
+    "totalMessageCount",
+    "unreadMessageCount"
+];
+
+const TBIRD_FOLDER_CAPABILITY_FIELDS = [
+    "canAddMessages",
+    "canAddSubfolders",
+    "canBeDeleted",
+    "canBeRenamed",
+    "canDeleteMessages"
+];
+
+const TBIRD_NOT_BIDIRECTIONALLY_SYNCED_ATTRIBUTES = [
+    {
+        surface: "MessageHeader",
+        attributes: ["id", "external", "headersOnly", "junkScore", "new", "priority", "recipients", "ccList", "bccList", "size"],
+        exposed_by_audit: true,
+        synced_bidirectionally: false,
+        reason: "These fields are read-only metadata or unstable locators. They are exposed for inspection but not written back as canonical C1-owned state."
+    },
+    {
+        surface: "MailFolder",
+        attributes: ["id", "isTag", "isUnified", "isVirtual", "subFolders"],
+        exposed_by_audit: true,
+        synced_bidirectionally: false,
+        reason: "Folder metadata is exposed for inspection. Folder moves/archives/deletes are command paths, but folder-tree metadata is not treated as mutable message state."
+    },
+    {
+        surface: "MailFolderInfo",
+        attributes: TBIRD_FOLDER_INFO_FIELDS,
+        exposed_by_audit: true,
+        synced_bidirectionally: false,
+        reason: "Folder counts, last-used timestamps, and quota are Thunderbird/provider-derived diagnostics."
+    },
+    {
+        surface: "MailFolderCapabilities",
+        attributes: TBIRD_FOLDER_CAPABILITY_FIELDS,
+        exposed_by_audit: true,
+        synced_bidirectionally: false,
+        reason: "Capabilities describe what Thunderbird says the folder can do; they are not message state."
+    },
+    {
+        surface: "MessagePart/getFull",
+        attributes: TBIRD_MESSAGE_PART_FIELDS,
+        exposed_by_audit: true,
+        synced_bidirectionally: false,
+        reason: "The full MIME tree is exposed for inspection. tbird-sync does not mutate arbitrary MIME parts."
+    },
+    {
+        surface: "MessageAttachment",
+        attributes: TBIRD_ATTACHMENT_FIELDS,
+        exposed_by_audit: true,
+        synced_bidirectionally: false,
+        reason: "Attachment metadata is exposed when Thunderbird APIs provide it. Attachment bytes/download lifecycle are not synced."
+    },
+    {
+        surface: "headers",
+        attributes: ["all RFC/message headers from getFull/getHeaders/getRaw"],
+        exposed_by_audit: true,
+        synced_bidirectionally: false,
+        reason: "Headers are exposed for inspection, but tbird-sync only normalizes selected state fields."
+    },
+    {
+        surface: "native replied/forwarded/thread/security state",
+        attributes: ["native replied flag", "native forwarded flag", "threadId", "conversation id", "authentication verdict", "signature verification", "encryption verification"],
+        exposed_by_audit: false,
+        synced_bidirectionally: false,
+        reason: "These are not exposed as complete mutable state by the current Thunderbird WebExtension message APIs used by tbird-sync."
+    }
+];
+
+const TBIRD_SYNC_STATE_CAPABILITIES = {
+    canonical_state_fields: [
+        "read",
+        "flagged",
+        "junk",
+        "tags",
+        "folder.accountId",
+        "folder.path",
+        "folder.name",
+        "folder.type",
+        "folder.specialUse",
+        "folder.isFavorite",
+        "folder.isRoot",
+        "date",
+        "subject",
+        "author",
+        "headerMessageId",
+        "size",
+        "stateReadAt"
+    ],
+    header_fields_exposed: TBIRD_MESSAGE_HEADER_FIELDS,
+    message_part_fields_exposed: TBIRD_MESSAGE_PART_FIELDS,
+    attachment_fields_exposed: TBIRD_ATTACHMENT_FIELDS,
+    folder_fields_exposed: TBIRD_FOLDER_FIELDS,
+    folder_info_fields_exposed: TBIRD_FOLDER_INFO_FIELDS,
+    folder_capability_fields_exposed: TBIRD_FOLDER_CAPABILITY_FIELDS,
+    writable_commands: [
+        "mark_read",
+        "mark_unread",
+        "set_flagged",
+        "set_junk",
+        "set_tags",
+        "archive",
+        "move",
+        "delete",
+        "bulk_mark_read",
+        "cortex.messages.updateByHeaderId",
+        "cortex.messages.archiveByHeaderId",
+        "cortex.messages.moveByHeaderId",
+        "cortex.messages.copyByHeaderId",
+        "cortex.messages.deleteByHeaderId"
+    ],
+    query_commands: [
+        "get_status",
+        "bulk_get_status",
+        "sync_state",
+        "bulk_sync_state",
+        "cortex.findMessageByHeaderId",
+        "cortex.messages.getFullByHeaderId",
+        "cortex.messages.getRawByHeaderId",
+        "cortex.messages.getStateAuditByHeaderId",
+        "messages.query",
+        "folders.query",
+        "messages.tags.list"
+    ],
+    event_sources: [
+        "messages.onNewMailReceived",
+        "messages.onUpdated",
+        "messages.onMoved",
+        "messages.onCopied",
+        "messages.onDeleted",
+        "messages.tags.onCreated",
+        "messages.tags.onUpdated",
+        "messages.tags.onDeleted",
+        "folders.onFolderInfoChanged",
+        "folders.onCreated",
+        "folders.onRenamed",
+        "folders.onMoved",
+        "folders.onDeleted",
+        "compose.onBeforeSend",
+        "compose.onAfterSend",
+        "compose.onAfterSave"
+    ],
+    unsupported_or_partial: [
+        {
+            field: "replied/forwarded native flags",
+            status: "partial",
+            reason: "Thunderbird WebExtension MessageHeader/MessageProperties do not expose native replied or forwarded flags. tbird-sync uses compose events and sent-folder/header inference where available."
+        },
+        {
+            field: "attachments",
+            status: "metadata-only",
+            reason: "getFull may expose MIME parts; tbird-sync reports a best-effort attachment manifest but does not sync attachment bytes or download state."
+        },
+        {
+            field: "calendar/ICS state",
+            status: "metadata-only",
+            reason: "Calendar invites may appear as MIME parts such as text/calendar, but no calendar acceptance or provider state is synced."
+        },
+        {
+            field: "thread id/conversation state",
+            status: "unsupported",
+            reason: "Thunderbird WebExtension messages API does not expose a stable threadId or thread API."
+        },
+        {
+            field: "security/authentication/crypto state",
+            status: "unsupported",
+            reason: "Message authentication results, encryption/signature verification state, and provider security verdicts are not normalized by tbird-sync."
+        },
+        {
+            field: "all raw headers",
+            status: "available-via-getFull-or-getRaw",
+            reason: "Headers can be inspected through getFull/getRaw, but tbird-sync does not normalize every header into canonical state."
+        },
+        {
+            field: "message id conflict resolution",
+            status: "partial",
+            reason: "headerMessageId is the durable locator; duplicate/missing Message-ID and move/restart internal-id changes are not fully conflict-modeled."
+        }
+    ]
+};
+
 /**
- * Build complete Thunderbird state object for a message.
- * Returns all available properties from TB API.
+ * Build the normalized Thunderbird state subset that cortex treats as canonical.
+ * Use getStateAuditByHeaderId for the broader capability/unsupported-property report.
  */
 function buildTbState(message) {
     if (!message) return null;
@@ -968,6 +1220,240 @@ async function deleteMessages(messageIds, skipTrash = false) {
         count: results.success.length,
         skipTrash: skipTrash === true,
         tb_states: tbStates
+    };
+}
+
+function buildAuditedMessageHeader(message) {
+    if (!message) return null;
+    const out = minifyMessageHeader(message) || {};
+    out.junkScore = message.junkScore != null ? message.junkScore : null;
+    out.new = message.new === true;
+    out.size = message.size || null;
+    return out;
+}
+
+function safeAuditValue(value, seen = new WeakSet()) {
+    if (value === undefined) return null;
+    if (value === null) return null;
+    if (value instanceof Date) return value.toISOString();
+    if (Array.isArray(value)) return value.map((item) => safeAuditValue(item, seen));
+
+    if (typeof value === "object") {
+        if (seen.has(value)) return "[Circular]";
+        seen.add(value);
+
+        const out = {};
+        for (const key of Object.keys(value)) {
+            const item = value[key];
+            if (typeof item === "function") continue;
+            out[key] = safeAuditValue(item, seen);
+        }
+        seen.delete(value);
+        return out;
+    }
+
+    if (typeof value === "bigint") return value.toString();
+    if (typeof value === "function") return null;
+    return value;
+}
+
+function listMissingFields(source, expectedFields) {
+    const object = source && typeof source === "object" ? source : {};
+    return expectedFields.filter((field) => !Object.prototype.hasOwnProperty.call(object, field));
+}
+
+function collectPartFieldNames(part, names = new Set()) {
+    if (!part || typeof part !== "object") return names;
+    Object.keys(part).forEach((key) => names.add(key));
+    const children = Array.isArray(part.parts) ? part.parts : [];
+    children.forEach((child) => collectPartFieldNames(child, names));
+    return names;
+}
+
+async function callAuditApi(apiName, fn, ...args) {
+    if (typeof fn !== "function") {
+        return {
+            api: apiName,
+            available: false,
+            error: "api not available",
+            value: null
+        };
+    }
+
+    try {
+        const value = await fn(...args);
+        return {
+            api: apiName,
+            available: value != null,
+            error: null,
+            value: safeAuditValue(value)
+        };
+    } catch (error) {
+        return {
+            api: apiName,
+            available: false,
+            error: error && error.message ? error.message : String(error),
+            value: null
+        };
+    }
+}
+
+function getPartHeaderValues(part, headerName) {
+    const headers = part && part.headers ? part.headers : null;
+    if (!headers) return [];
+    const want = String(headerName || "").toLowerCase();
+    for (const [name, values] of Object.entries(headers)) {
+        if (String(name).toLowerCase() !== want) continue;
+        if (Array.isArray(values)) return values.map((v) => String(v));
+        return [String(values)];
+    }
+    return [];
+}
+
+function getPartFirstHeader(part, headerName) {
+    const values = getPartHeaderValues(part, headerName);
+    return values.length ? values[0] : "";
+}
+
+function collectHeaderNames(full) {
+    const headers = full && full.headers && typeof full.headers === "object" ? full.headers : {};
+    return Object.keys(headers).map((name) => String(name).toLowerCase()).sort();
+}
+
+function buildAttachmentManifestFromFull(full) {
+    const attachments = [];
+
+    const visit = (part, path) => {
+        if (!part || typeof part !== "object") return;
+        const contentType = String(part.contentType || part.content_type || "").toLowerCase();
+        const contentDisposition = getPartFirstHeader(part, "content-disposition").toLowerCase();
+        const contentTypeHeader = getPartFirstHeader(part, "content-type");
+        const name = part.name || part.filename || part.fileName || "";
+        const partName = part.partName || part.name || path;
+        const isMultipart = contentType.startsWith("multipart/");
+        const looksAttached =
+            contentDisposition.includes("attachment") ||
+            /;\s*filename=/i.test(contentDisposition) ||
+            /;\s*name=/i.test(contentTypeHeader) ||
+            Boolean(name);
+
+        if (!isMultipart && looksAttached) {
+            attachments.push({
+                partName,
+                path,
+                name: name || null,
+                contentType: contentType || null,
+                size: Number.isFinite(Number(part.size)) ? Number(part.size) : null,
+                disposition: contentDisposition || null,
+                isCalendar: contentType === "text/calendar" || /\.ics$/i.test(String(name || "")),
+                contentAvailableViaGetFull: typeof part.body === "string"
+            });
+        }
+
+        const children = Array.isArray(part.parts) ? part.parts : [];
+        children.forEach((child, idx) => visit(child, path ? `${path}.${idx + 1}` : String(idx + 1)));
+    };
+
+    visit(full, "");
+    return attachments;
+}
+
+async function getStateAuditByHeaderId(headerMessageId) {
+    const message = await findMessageByHeaderId(headerMessageId);
+    if (!message) throw new Error("Message not found");
+
+    let full = null;
+    let fullError = null;
+    try {
+        full = await messenger.messages.getFull(message.id);
+    } catch (error) {
+        fullError = error && error.message ? error.message : String(error);
+    }
+
+    const attachmentManifest = full ? buildAttachmentManifestFromFull(full) : [];
+    const headerNames = full ? collectHeaderNames(full) : [];
+    const folder = message.folder || null;
+    const headers = await callAuditApi(
+        "messages.getHeaders",
+        messenger.messages && messenger.messages.getHeaders,
+        message.id
+    );
+    const attachments = await callAuditApi(
+        "messages.listAttachments",
+        messenger.messages && messenger.messages.listAttachments,
+        message.id
+    );
+    const folderInfo = await callAuditApi(
+        "folders.getFolderInfo",
+        messenger.folders && messenger.folders.getFolderInfo,
+        folder
+    );
+    const folderCapabilities = await callAuditApi(
+        "folders.getCapabilities",
+        messenger.folders && messenger.folders.getCapabilities,
+        folder
+    );
+    const fullPartFields = Array.from(collectPartFieldNames(full)).sort();
+
+    return {
+        schema_version: TBIRD_SYNC_STATE_AUDIT_SCHEMA_VERSION,
+        extension_version: getExtensionVersion(),
+        headerMessageId,
+        messageId: message.id,
+        locator: {
+            durable: "headerMessageId",
+            internalMessageId: message.id,
+            internalMessageIdStable: false,
+            caveats: [
+                "Thunderbird internal message ids can change after moves, imports, or profile rebuilds.",
+                "Duplicate or missing RFC Message-ID values require caller-side conflict handling."
+            ]
+        },
+        capabilities: TBIRD_SYNC_STATE_CAPABILITIES,
+        message_header: buildAuditedMessageHeader(message),
+        raw_message_header: safeAuditValue(message),
+        raw_folder: safeAuditValue(folder),
+        tb_state: buildTbState(message),
+        full: {
+            available: Boolean(full),
+            error: fullError,
+            header_names: headerNames,
+            has_body: Boolean(full && typeof full.body === "string"),
+            has_parts: Boolean(full && Array.isArray(full.parts) && full.parts.length > 0)
+        },
+        full_message_part: safeAuditValue(full),
+        headers: {
+            ...headers,
+            names: headers.value && typeof headers.value === "object"
+                ? Object.keys(headers.value).map((name) => String(name).toLowerCase()).sort()
+                : []
+        },
+        attachments: {
+            ...attachments,
+            manifest_from_getFull: attachmentManifest
+        },
+        folder_info: folderInfo,
+        folder_capabilities: folderCapabilities,
+        attachments_manifest: attachmentManifest,
+        calendar_manifest: attachmentManifest.filter((part) => part.isCalendar),
+        unsupported_properties: TBIRD_SYNC_STATE_CAPABILITIES.unsupported_or_partial,
+        missing_or_not_synced_attributes: {
+            missing_from_message_header_api: listMissingFields(message, TBIRD_MESSAGE_HEADER_FIELDS),
+            missing_from_folder_api: folder ? listMissingFields(folder, TBIRD_FOLDER_FIELDS) : TBIRD_FOLDER_FIELDS,
+            missing_from_full_api: full ? listMissingFields(full, TBIRD_MESSAGE_PART_FIELDS) : TBIRD_MESSAGE_PART_FIELDS,
+            message_part_fields_seen: fullPartFields,
+            missing_from_getHeaders_api: headers.available ? [] : ["messages.getHeaders"],
+            missing_from_listAttachments_api: attachments.available ? [] : ["messages.listAttachments"],
+            missing_from_getFolderInfo_api: folderInfo.available ? [] : ["folders.getFolderInfo"],
+            missing_from_getCapabilities_api: folderCapabilities.available ? [] : ["folders.getCapabilities"],
+            not_bidirectionally_synced: TBIRD_NOT_BIDIRECTIONALLY_SYNCED_ATTRIBUTES
+        },
+        audit_notes: [
+            "This is an explicit capability audit, not a claim that every Thunderbird-exposed property is bidirectionally synced.",
+            "Raw Thunderbird objects are included as JSON-safe snapshots for inspection; only tb_state is the canonical bidirectional state subset.",
+            "Use getFull/getRaw for raw body/header inspection; use this audit RPC to see what tbird-sync normalizes and what remains partial or unsupported."
+        ],
+        audited_at: new Date().toISOString()
     };
 }
 
@@ -1894,6 +2380,9 @@ async function cortexRpc(methodPath, args) {
                 full,
                 state: buildTbState(message)
             };
+        }
+        case "cortex.messages.getStateAuditByHeaderId": {
+            return await getStateAuditByHeaderId(args[0]);
         }
         case "cortex.messages.getRawByHeaderId": {
             const headerMessageId = args[0];
@@ -3487,6 +3976,12 @@ if (typeof module !== "undefined" && module && module.exports) {
         minifyMessageHeader,
         minifyFolder,
         buildTbState,
+        buildAuditedMessageHeader,
+        safeAuditValue,
+        listMissingFields,
+        buildAttachmentManifestFromFull,
+        getStateAuditByHeaderId,
+        TBIRD_NOT_BIDIRECTIONALLY_SYNCED_ATTRIBUTES,
         findMessageByHeaderId,
         findFolder,
 

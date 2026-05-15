@@ -24,6 +24,8 @@ The extension communicates with cortex_server using **WebSocket** (real-time, so
 
 **Supported operations:** mark read/unread, flag, junk, archive, move, delete, open message, create/send reply drafts, and generic RPC calls into Thunderbird's WebExtension APIs.
 
+**Property audit:** `cortex.messages.getStateAuditByHeaderId` reports the canonical `tb_state`, raw JSON-safe Thunderbird API snapshots, missing live API fields, and the explicit list of attributes that are exposed but not synced bidirectionally. See [TBIRD_SYNC_PROPERTY_MATRIX.md](TBIRD_SYNC_PROPERTY_MATRIX.md).
+
 **Real-time ingest:** New mail is detected via `messages.onNewMailReceived` (with inbox polling as bounded-delay fallback).
 
 ## Configuration
@@ -56,7 +58,7 @@ See [TESTING.md](TESTING.md) for test tiers, coverage thresholds, and pre-commit
 
 ## API Reference
 
-For the full WebSocket protocol, supported actions, RPC contracts, and server endpoint specifications, see [DEVELOPER.md](DEVELOPER.md).
+For the full WebSocket protocol, supported actions, RPC contracts, and server endpoint specifications, see [DEVELOPER.md](DEVELOPER.md). For Thunderbird property exposure and sync-direction details, see [TBIRD_SYNC_PROPERTY_MATRIX.md](TBIRD_SYNC_PROPERTY_MATRIX.md).
 
 ## License
 

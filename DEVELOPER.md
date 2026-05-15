@@ -97,6 +97,16 @@ Bidirectional WebSocket for real-time communication.
 |--------|-------------|
 | `rpc` | Execute an allowlisted Thunderbird WebExtension method (`method`, `args`) |
 
+### Audit RPCs
+
+| RPC method | Description |
+|------------|-------------|
+| `cortex.messages.getFullByHeaderId` | Resolve a message by RFC `Message-ID`, return Thunderbird `messages.getFull()` plus current canonical `tb_state`. |
+| `cortex.messages.getRawByHeaderId` | Resolve a message by RFC `Message-ID`, return Thunderbird `messages.getRaw()` source. |
+| `cortex.messages.getStateAuditByHeaderId` | Resolve a message by RFC `Message-ID`, return canonical `tb_state`, raw JSON-safe Thunderbird snapshots, missing live API fields, and every known attribute class that is exposed but not synced bidirectionally. |
+
+`cortex.messages.getStateAuditByHeaderId` is the source of truth for current property coverage. The human-readable matrix is maintained in [TBIRD_SYNC_PROPERTY_MATRIX.md](TBIRD_SYNC_PROPERTY_MATRIX.md).
+
 ### Status Query Notes
 
 The `get_status` and `bulk_get_status` commands return **live status** from Thunderbird:

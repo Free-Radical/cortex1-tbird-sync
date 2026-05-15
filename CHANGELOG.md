@@ -1,6 +1,10 @@
 # Changelog
 
 ## Unreleased
+- Added `cortex.messages.getStateAuditByHeaderId` property audit coverage for raw
+  JSON-safe Thunderbird snapshots, optional API availability, missing live
+  fields, and the explicit not-bidirectionally-synced attribute list.
+- Added `TBIRD_SYNC_PROPERTY_MATRIX.md` and linked it from README/DEVELOPER docs.
 - Backfill scans now run on a dedicated slow lane so high-priority RPCs such as
   `accounts.list` and `cancel_job` can complete while a long scan is still
   running.

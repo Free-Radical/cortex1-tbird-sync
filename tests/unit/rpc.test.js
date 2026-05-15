@@ -343,6 +343,195 @@ describe("RPC Method Execution", () => {
     });
 
     // =========================================================================
+    // cortex.messages.getStateAuditByHeaderId
+    // =========================================================================
+    describe("cortex.messages.getStateAuditByHeaderId", () => {
+        it("should return explicit sync capabilities, canonical state, and attachment manifest", async () => {
+            const message = createMockMessage({
+                id: 9876,
+                headerMessageId: "audit@example.com",
+                read: true,
+                flagged: true,
+                junk: false,
+                junkScore: 42,
+                new: true,
+                priority: "high",
+                external: false,
+                headersOnly: false,
+                tags: ["work", "follow-up"],
+            });
+            messenger.messages.query.mockResolvedValue({ messages: [message] });
+            messenger.messages.getFull.mockResolvedValue({
+                contentType: "multipart/mixed",
+                headers: {
+                    subject: ["Audit message"],
+                    "authentication-results": ["mx.example.com; spf=pass"],
+                    "in-reply-to": ["<parent@example.com>"],
+                },
+                body: "root body",
+                parts: [
+                    {
+                        partName: "1",
+                        contentType: "text/plain",
+                        body: "hello",
+                    },
+                    {
+                        partName: "2",
+                        contentType: "application/pdf",
+                        name: "invoice.pdf",
+                        size: 1234,
+                        headers: {
+                            "content-disposition": ["attachment; filename=\"invoice.pdf\""],
+                        },
+                    },
+                    {
+                        partName: "3",
+                        contentType: "text/calendar",
+                        name: "invite.ics",
+                        size: 456,
+                        headers: {
+                            "content-disposition": ["attachment; filename=\"invite.ics\""],
+                        },
+                    },
+                ],
+            });
+            messenger.messages.getHeaders.mockResolvedValue({
+                subject: ["Audit message"],
+                "x-custom-header": ["custom-value"],
+            });
+            messenger.messages.listAttachments.mockResolvedValue([
+                {
+                    contentType: "application/pdf",
+                    name: "invoice.pdf",
+                    partName: "2",
+                    size: 1234,
+                },
+            ]);
+            messenger.folders.getFolderInfo.mockResolvedValue({
+                totalMessageCount: 10,
+                unreadMessageCount: 2,
+                newMessageCount: 1,
+                favorite: false,
+                lastUsed: "2026-05-01T00:00:00.000Z",
+                lastUsedAsDestination: null,
+                quota: null,
+            });
+            messenger.folders.getCapabilities.mockResolvedValue({
+                canAddMessages: true,
+                canAddSubfolders: true,
+                canBeDeleted: false,
+                canBeRenamed: false,
+                canDeleteMessages: true,
+            });
+
+            const result = await bg.executeRpcCommand({
+                method: "cortex.messages.getStateAuditByHeaderId",
+                args: ["audit@example.com"],
+            });
+
+            expect(result.success).toBe(true);
+            expect(result.result.schema_version).toBe("1.0");
+            expect(result.result.headerMessageId).toBe("audit@example.com");
+            expect(result.result.messageId).toBe(9876);
+            expect(result.result.locator.durable).toBe("headerMessageId");
+            expect(result.result.locator.internalMessageIdStable).toBe(false);
+            expect(result.result.capabilities.canonical_state_fields).toContain("read");
+            expect(result.result.capabilities.writable_commands).toContain("set_tags");
+            expect(result.result.capabilities.unsupported_or_partial.map((x) => x.field))
+                .toContain("replied/forwarded native flags");
+            expect(result.result.message_header.junkScore).toBe(42);
+            expect(result.result.message_header.new).toBe(true);
+            expect(result.result.tb_state.read).toBe(true);
+            expect(result.result.tb_state.tags).toEqual(["work", "follow-up"]);
+            expect(result.result.raw_message_header.priority).toBe("high");
+            expect(result.result.raw_folder.path).toBe("/INBOX");
+            expect(result.result.full.available).toBe(true);
+            expect(result.result.full.header_names).toContain("authentication-results");
+            expect(result.result.full_message_part.contentType).toBe("multipart/mixed");
+            expect(result.result.headers.available).toBe(true);
+            expect(result.result.headers.names).toContain("x-custom-header");
+            expect(result.result.attachments.available).toBe(true);
+            expect(result.result.attachments.value[0].name).toBe("invoice.pdf");
+            expect(result.result.folder_info.available).toBe(true);
+            expect(result.result.folder_info.value.totalMessageCount).toBe(10);
+            expect(result.result.folder_capabilities.available).toBe(true);
+            expect(result.result.folder_capabilities.value.canDeleteMessages).toBe(true);
+            expect(result.result.attachments_manifest.map((x) => x.name)).toEqual(["invoice.pdf", "invite.ics"]);
+            expect(result.result.calendar_manifest).toHaveLength(1);
+            expect(result.result.calendar_manifest[0].name).toBe("invite.ics");
+            expect(result.result.missing_or_not_synced_attributes.missing_from_message_header_api).toEqual([]);
+            expect(result.result.missing_or_not_synced_attributes.not_bidirectionally_synced[0].surface)
+                .toBe("MessageHeader");
+            expect(result.result.audit_notes[0]).toContain("not a claim");
+        });
+
+        it("should report getFull errors without hiding canonical state", async () => {
+            messenger.messages.getFull.mockRejectedValue(new Error("full body unavailable"));
+            messenger.messages.getHeaders.mockRejectedValue(new Error("headers unavailable"));
+
+            const result = await bg.executeRpcCommand({
+                method: "cortex.messages.getStateAuditByHeaderId",
+                args: ["test-msg-id@example.com"],
+            });
+
+            expect(result.success).toBe(true);
+            expect(result.result.tb_state.headerMessageId).toBe("test-msg-id@example.com");
+            expect(result.result.full.available).toBe(false);
+            expect(result.result.full.error).toBe("full body unavailable");
+            expect(result.result.attachments_manifest).toEqual([]);
+            expect(result.result.full_message_part).toBeNull();
+            expect(result.result.headers.available).toBe(false);
+            expect(result.result.headers.error).toBe("headers unavailable");
+            expect(result.result.missing_or_not_synced_attributes.missing_from_full_api)
+                .toContain("contentType");
+        });
+
+        it("should report optional Thunderbird audit APIs as unavailable when absent", async () => {
+            messenger.messages.getFull.mockResolvedValue({
+                contentType: "text/plain",
+                headers: {},
+                body: "hello",
+            });
+            messenger.messages.getHeaders = undefined;
+            messenger.messages.listAttachments = undefined;
+            messenger.folders.getFolderInfo = undefined;
+            messenger.folders.getCapabilities = undefined;
+
+            const result = await bg.executeRpcCommand({
+                method: "cortex.messages.getStateAuditByHeaderId",
+                args: ["test-msg-id@example.com"],
+            });
+
+            expect(result.success).toBe(true);
+            expect(result.result.headers.available).toBe(false);
+            expect(result.result.headers.error).toBe("api not available");
+            expect(result.result.attachments.available).toBe(false);
+            expect(result.result.folder_info.available).toBe(false);
+            expect(result.result.folder_capabilities.available).toBe(false);
+            expect(result.result.missing_or_not_synced_attributes.missing_from_getHeaders_api)
+                .toEqual(["messages.getHeaders"]);
+            expect(result.result.missing_or_not_synced_attributes.missing_from_listAttachments_api)
+                .toEqual(["messages.listAttachments"]);
+            expect(result.result.missing_or_not_synced_attributes.missing_from_getFolderInfo_api)
+                .toEqual(["folders.getFolderInfo"]);
+            expect(result.result.missing_or_not_synced_attributes.missing_from_getCapabilities_api)
+                .toEqual(["folders.getCapabilities"]);
+        });
+
+        it("should fail when message is not found", async () => {
+            messenger.messages.query.mockResolvedValue({ messages: [] });
+
+            const result = await bg.executeRpcCommand({
+                method: "cortex.messages.getStateAuditByHeaderId",
+                args: ["missing@example.com"],
+            });
+
+            expect(result.success).toBe(false);
+            expect(result.error).toBe("Message not found");
+        });
+    });
+
+    // =========================================================================
     // cortex.messages.getRawByHeaderId
     // =========================================================================
     describe("cortex.messages.getRawByHeaderId", () => {
@@ -754,6 +943,37 @@ describe("RPC Method Execution", () => {
             expect(bg.sanitizeRpcResult("string")).toBe("string");
             expect(bg.sanitizeRpcResult(123)).toBe(123);
             expect(bg.sanitizeRpcResult(true)).toBe(true);
+        });
+    });
+
+    // =========================================================================
+    // Audit helper sanitization
+    // =========================================================================
+    describe("audit helper sanitization", () => {
+        it("safeAuditValue should preserve JSON-safe values and mark circular references", () => {
+            const obj = {
+                date: new Date("2026-05-15T12:00:00.000Z"),
+                missing: undefined,
+                count: BigInt(7),
+                nested: { keep: true },
+                fn: () => "skip",
+            };
+            obj.self = obj;
+
+            const result = bg.safeAuditValue(obj);
+
+            expect(result.date).toBe("2026-05-15T12:00:00.000Z");
+            expect(result.missing).toBeNull();
+            expect(result.count).toBe("7");
+            expect(result.nested).toEqual({ keep: true });
+            expect(result.fn).toBeUndefined();
+            expect(result.self).toBe("[Circular]");
+        });
+
+        it("listMissingFields should report only absent expected properties", () => {
+            const result = bg.listMissingFields({ read: false, tags: [] }, ["read", "flagged", "tags"]);
+
+            expect(result).toEqual(["flagged"]);
         });
     });
 

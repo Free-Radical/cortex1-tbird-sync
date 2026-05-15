@@ -99,7 +99,9 @@ const createMockMessenger = () => {
             continueList: jest.fn(),
             query: jest.fn(),
             getFull: jest.fn(),
+            getHeaders: jest.fn(),
             getRaw: jest.fn(),
+            listAttachments: jest.fn(),
             onNewMailReceived: {
                 addListener: jest.fn()
             },
@@ -113,6 +115,7 @@ const createMockMessenger = () => {
         folders: {
             get: jest.fn(),
             getFolderInfo: jest.fn(),
+            getCapabilities: jest.fn(),
             query: jest.fn(),
             create: jest.fn(),
             rename: jest.fn(),

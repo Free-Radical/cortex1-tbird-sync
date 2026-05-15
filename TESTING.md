@@ -24,6 +24,7 @@ npm test
 
 - Command/action handlers
 - RPC allowlisting and execution
+- Audit RPC property exposure, optional Thunderbird API availability, and JSON-safe raw snapshot handling
 - Event queue and diagnostics behavior
 - `tb_state` response construction
 
