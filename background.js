@@ -7,6 +7,7 @@
 
 const DEFAULT_CORTEX_SERVER = "http://127.0.0.1:5001";
 const CORTEX_SERVER_STORAGE_KEY = "cortex_server_url";
+const CLIENT_ID_STORAGE_KEY = "cortex_tbird_sync_client_id_v1";
 // HTTP polling removed — WebSocket is the sole IPC transport.
 // POLL_INTERVAL_MS retained only for completion-flush retry cadence.
 const POLL_INTERVAL_MS = 3000;
@@ -35,6 +36,7 @@ let isFlushingEvents = false;
 
 let cachedCortexServerUrl = null;
 let hasLoadedCortexServerUrl = false;
+let cachedClientId = null;
 
 function normalizeLoopbackServerUrl(value) {
     const raw = String(value || "").trim();
@@ -182,6 +184,40 @@ function getExtensionVersion() {
     } catch (error) {
         return "unknown";
     }
+}
+
+function createClientId() {
+    try {
+        if (globalThis.crypto && typeof globalThis.crypto.randomUUID === "function") {
+            return `tbird-sync-${globalThis.crypto.randomUUID()}`;
+        }
+    } catch (error) {
+        // Fall through to timestamp/random fallback below.
+    }
+    const rand = Math.random().toString(36).slice(2, 12);
+    return `tbird-sync-${Date.now().toString(36)}-${rand}`;
+}
+
+async function getExtensionClientId() {
+    if (cachedClientId) return cachedClientId;
+    try {
+        const stored = await messenger.storage.local.get(CLIENT_ID_STORAGE_KEY);
+        const value = stored && stored[CLIENT_ID_STORAGE_KEY];
+        if (typeof value === "string" && value.trim()) {
+            cachedClientId = value.trim();
+            return cachedClientId;
+        }
+    } catch (error) {
+        // Storage can fail in restricted/test contexts; still provide a live-session id.
+    }
+
+    cachedClientId = createClientId();
+    try {
+        await messenger.storage.local.set({ [CLIENT_ID_STORAGE_KEY]: cachedClientId });
+    } catch (error) {
+        // Best effort only. The in-memory id still identifies this connection.
+    }
+    return cachedClientId;
 }
 
 async function getCortexServerUrl() {
@@ -2692,7 +2728,13 @@ async function handleWebSocketMessage(msg) {
     }
 
     if (msgType === "ping") {
-        sendWebSocketMessage({ type: "pong", data: { timestamp: Date.now() } });
+        const clientId = await getExtensionClientId();
+        sendWebSocketMessage({
+            type: "pong",
+            client_id: clientId,
+            clientId,
+            data: { timestamp: Date.now(), client_id: clientId, clientId }
+        });
         return;
     }
 
@@ -2734,6 +2776,18 @@ async function connectWebSocket() {
             wsReconnectAttempts = 0;
             connectionState = "CONNECTED";
             setIndicator({ connected: true });
+            getExtensionClientId()
+                .then((clientId) => {
+                    sendWebSocketMessage({
+                        type: "hello",
+                        client_id: clientId,
+                        clientId,
+                        extension_version: getExtensionVersion()
+                    });
+                })
+                .catch((error) => {
+                    DebugLogger.log("transport", "Failed to send WS hello", { error: String(error) });
+                });
             // Flush any queued completions/events that accumulated while disconnected
             scheduleCompletionFlush(0);
             scheduleFlushQueue();
@@ -3166,10 +3220,18 @@ async function flushCompletions() {
 
         while (completionQueue.length > 0) {
             const batch = completionQueue.slice(0, 25);
+            const clientId = await getExtensionClientId();
+            const stampedBatch = batch.map((result) => ({
+                ...(result || {}),
+                client_id: clientId,
+                clientId
+            }));
             const sent = sendWebSocketMessage({
                 type: "results",
-                results: batch,
-                data: batch
+                client_id: clientId,
+                clientId,
+                results: stampedBatch,
+                data: stampedBatch
             });
             if (!sent) {
                 DebugLogger.log("complete", "WS send failed, deferring", { queued: completionQueue.length });
@@ -3471,6 +3533,7 @@ if (typeof module !== "undefined" && module && module.exports) {
         scheduleReconnect,
         getCortexServerUrl,
         getWebSocketUrl,
+        getExtensionClientId,
         normalizeLoopbackServerUrl,
         _setWs: function(mockWs) { ws = mockWs; },
         _getWs: function() { return ws; },

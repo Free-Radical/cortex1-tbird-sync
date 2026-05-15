@@ -24,7 +24,7 @@ function createDeferred() {
     return { promise, resolve, reject };
 }
 
-async function flushPromises(count = 10) {
+async function flushPromises(count = 20) {
     for (let i = 0; i < count; i++) {
         await Promise.resolve();
     }
