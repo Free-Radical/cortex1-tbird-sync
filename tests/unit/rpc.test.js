@@ -114,6 +114,177 @@ describe("RPC Method Execution", () => {
     });
 
     // =========================================================================
+    // cortex.messages.findByLocator
+    // =========================================================================
+    describe("cortex.messages.findByLocator", () => {
+        it("should recover through message-id candidates using existing header lookup", async () => {
+            const recovered = createMockMessage({
+                id: 24680,
+                headerMessageId: "current-msg-id@example.com"
+            });
+            messenger.messages.query
+                .mockResolvedValueOnce({ messages: [] })
+                .mockResolvedValueOnce({ messages: [recovered] });
+
+            const result = await bg.executeRpcCommand({
+                method: "cortex.messages.findByLocator",
+                args: [{
+                    message_id: "stale-msg-id@example.com",
+                    messageId: "current-msg-id@example.com",
+                    account_id: "account1",
+                    folder_path: "/INBOX"
+                }]
+            });
+
+            expect(result.success).toBe(true);
+            expect(result.result.message.id).toBe(24680);
+            expect(result.result.match).toEqual({
+                strategy: "message_id",
+                candidate: "current-msg-id@example.com"
+            });
+            expect(messenger.messages.query).toHaveBeenNthCalledWith(1, {
+                headerMessageId: "stale-msg-id@example.com"
+            });
+            expect(messenger.messages.query).toHaveBeenNthCalledWith(2, {
+                headerMessageId: "current-msg-id@example.com"
+            });
+            expect(messenger.messages.list).not.toHaveBeenCalled();
+        });
+
+        it("should fall back with a date-window query for unique account folder sender subject date match", async () => {
+            const folder = createMockFolder({ accountId: "account1", path: "/INBOX" });
+            const nearby = createMockMessage({
+                id: 35791,
+                headerMessageId: "rekeyed-msg-id@example.com",
+                author: "Sender Name <sender@example.com>",
+                subject: "Moved message",
+                date: new Date("2026-05-20T14:03:00.000Z"),
+                folder
+            });
+            const other = createMockMessage({
+                id: 35792,
+                author: "other@example.com",
+                subject: "Moved message",
+                date: new Date("2026-05-20T14:02:00.000Z"),
+                folder
+            });
+            const newerNonmatching = createMockMessage({
+                id: 35793,
+                author: "newer@example.com",
+                subject: "Newest unrelated",
+                date: new Date("2026-05-20T14:09:00.000Z"),
+                folder
+            });
+            messenger.accounts.list.mockResolvedValue([
+                createMockAccount({ id: "account1", folders: [folder] })
+            ]);
+            messenger.messages.query
+                .mockResolvedValueOnce({ messages: [] })
+                .mockResolvedValueOnce({ messages: [newerNonmatching, other, nearby], id: null });
+
+            const result = await bg.executeRpcCommand({
+                method: "cortex.messages.findByLocator",
+                args: [{
+                    message_id: "stale-msg-id@example.com",
+                    account_id: "account1",
+                    folder_path: "/INBOX",
+                    from_addr: "sender@example.com",
+                    subject: "Moved message",
+                    received_at: "2026-05-20T14:00:00.000Z",
+                    window_seconds: 600,
+                    max_scan: 20
+                }]
+            });
+
+            expect(result.success).toBe(true);
+            expect(result.result.message.id).toBe(35791);
+            expect(result.result.match.strategy).toBe("folder_date_content");
+            expect(result.result.match.folder_path).toBe("/INBOX");
+            expect(messenger.messages.query).toHaveBeenNthCalledWith(2, {
+                folder,
+                fromDate: new Date("2026-05-20T13:50:00.000Z")
+            });
+            expect(messenger.messages.list).not.toHaveBeenCalled();
+        });
+
+        it("should return none instead of guessing when fallback is ambiguous", async () => {
+            const folder = createMockFolder({ accountId: "account1", path: "/INBOX" });
+            const msg1 = createMockMessage({
+                id: 41001,
+                author: "sender@example.com",
+                subject: "Ambiguous message",
+                date: new Date("2026-05-20T14:01:00.000Z"),
+                folder
+            });
+            const msg2 = createMockMessage({
+                id: 41002,
+                author: "Sender Name <sender@example.com>",
+                subject: "Ambiguous message",
+                date: new Date("2026-05-20T14:02:00.000Z"),
+                folder
+            });
+            messenger.accounts.list.mockResolvedValue([
+                createMockAccount({ id: "account1", folders: [folder] })
+            ]);
+            messenger.messages.query.mockResolvedValue({ messages: [msg1, msg2], id: null });
+
+            const result = await bg.executeRpcCommand({
+                method: "cortex.messages.findByLocator",
+                args: [{
+                    accountId: "account1",
+                    folderPath: "/INBOX",
+                    from: "sender@example.com",
+                    subject: "Ambiguous message",
+                    date: "2026-05-20T14:00:00.000Z",
+                    windowSeconds: 600
+                }]
+            });
+
+            expect(result.success).toBe(true);
+            expect(result.result.message).toBeNull();
+            expect(result.result.match).toEqual({
+                strategy: "none",
+                reason: "ambiguous_locator"
+            });
+        });
+
+        it("should stop fallback scans at the requested bounded cap", async () => {
+            const folder = createMockFolder({ accountId: "account1", path: "/INBOX" });
+            const messages = [
+                createMockMessage({ id: 1, author: "first@example.com", subject: "Different", date: new Date("2026-05-20T14:00:00.000Z"), folder }),
+                createMockMessage({ id: 2, author: "second@example.com", subject: "Different", date: new Date("2026-05-20T14:00:00.000Z"), folder }),
+                createMockMessage({ id: 3, author: "third@example.com", subject: "Different", date: new Date("2026-05-20T14:00:00.000Z"), folder }),
+                createMockMessage({ id: 4, author: "sender@example.com", subject: "Late match", date: new Date("2026-05-20T14:00:00.000Z"), folder })
+            ];
+            messenger.accounts.list.mockResolvedValue([
+                createMockAccount({ id: "account1", folders: [folder] })
+            ]);
+            messenger.messages.query.mockResolvedValue({ messages, id: null });
+
+            const result = await bg.executeRpcCommand({
+                method: "cortex.messages.findByLocator",
+                args: [{
+                    account_id: "account1",
+                    folder_path: "/INBOX",
+                    from_addr: "sender@example.com",
+                    subject: "Late match",
+                    received_at: "2026-05-20T14:00:00.000Z",
+                    max_scan: 3
+                }]
+            });
+
+            expect(result.success).toBe(true);
+            expect(result.result.message).toBeNull();
+            expect(result.result.match).toEqual({
+                strategy: "none",
+                reason: "not_found"
+            });
+            expect(result.result.candidates_checked).toBe(3);
+            expect(messenger.messages.continueList).not.toHaveBeenCalled();
+        });
+    });
+
+    // =========================================================================
     // cortex.resolveMessageIds
     // =========================================================================
     describe("cortex.resolveMessageIds", () => {

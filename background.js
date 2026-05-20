@@ -580,6 +580,7 @@ const TBIRD_SYNC_STATE_CAPABILITIES = {
         "bulk_sync_state",
         "cortex.findMessageByHeaderId",
         "cortex.messages.getFullByHeaderId",
+        "cortex.messages.findByLocator",
         "cortex.messages.getRawByHeaderId",
         "cortex.messages.getStateAuditByHeaderId",
         "messages.query",
@@ -1749,6 +1750,176 @@ function filterMessagesByScope(messages, expectedAccountId = "", expectedFolderP
     });
 }
 
+const LOCATOR_SEARCH_DEFAULT_WINDOW_SECONDS = 6 * 60 * 60;
+const LOCATOR_SEARCH_DEFAULT_MAX_SCAN = 200;
+const LOCATOR_SEARCH_HARD_MAX_SCAN = 500;
+
+function appendLocatorMessageIdCandidate(out, seen, value) {
+    if (value == null) return;
+    const clean = String(value).trim().replace(/^<+/, "").replace(/>+$/, "");
+    const key = clean.toLowerCase();
+    if (!clean || seen.has(key)) return;
+    seen.add(key);
+    out.push(clean);
+}
+
+function getLocatorMessageIdCandidates(locator) {
+    const out = [];
+    const seen = new Set();
+    if (!locator || typeof locator !== "object") return out;
+
+    for (const key of ["message_id", "messageId", "headerMessageId"]) {
+        appendLocatorMessageIdCandidate(out, seen, locator[key]);
+    }
+    for (const key of ["message_id_candidates", "messageIdCandidates", "headerMessageIds"]) {
+        const values = Array.isArray(locator[key]) ? locator[key] : [];
+        for (const value of values) appendLocatorMessageIdCandidate(out, seen, value);
+    }
+    return out;
+}
+
+function normalizeLocatorText(value) {
+    return String(value || "").trim().replace(/\s+/g, " ").toLowerCase();
+}
+
+function normalizeLocatorAddress(value) {
+    const text = normalizeLocatorText(value);
+    if (!text) return "";
+    const bracketMatch = text.match(/<([^>\s]+@[^>\s]+)>/);
+    if (bracketMatch) return bracketMatch[1];
+    const emailMatch = text.match(/[\w.!#$%&'*+/=?^`{|}~-]+@[\w.-]+/);
+    return emailMatch ? emailMatch[0] : text;
+}
+
+function getLocatorValue(locator, keys) {
+    for (const key of keys) {
+        const value = locator && locator[key];
+        if (value != null && String(value).trim()) return value;
+    }
+    return "";
+}
+
+function buildLocatorFolderRef(locator) {
+    const folderValue = getLocatorValue(locator, ["folder_path", "folderPath"]);
+    const folder = locator && locator.folder;
+    const accountId = getLocatorValue(locator, ["account_id", "accountId"]);
+
+    if (folder && typeof folder === "object") {
+        return {
+            ...folder,
+            accountId: folder.accountId || accountId,
+            path: folder.path || folderValue
+        };
+    }
+    if (typeof folder === "string" && folder.trim()) {
+        return { accountId, path: folder };
+    }
+    return { accountId, path: folderValue };
+}
+
+function locatorMessageMatches(message, expected) {
+    if (!message || typeof message !== "object") return false;
+    if (normalizeLocatorAddress(message.author) !== expected.from) return false;
+    if (normalizeLocatorText(message.subject) !== expected.subject) return false;
+    const msgDateMs = getMessageDateMs(message);
+    if (msgDateMs === null) return false;
+    return Math.abs(msgDateMs - expected.dateMs) <= expected.windowSeconds * 1000;
+}
+
+async function findMessageByLocator(locator) {
+    if (!locator || typeof locator !== "object") {
+        return {
+            message: null,
+            match: { strategy: "none", reason: "locator_required" },
+            candidates_checked: 0
+        };
+    }
+
+    let candidatesChecked = 0;
+    for (const candidate of getLocatorMessageIdCandidates(locator)) {
+        candidatesChecked += 1;
+        const message = await findMessageByHeaderId(candidate);
+        if (message) {
+            return {
+                message: minifyMessageHeader(message),
+                match: { strategy: "message_id", candidate },
+                candidates_checked: candidatesChecked
+            };
+        }
+    }
+
+    const folderRef = buildLocatorFolderRef(locator);
+    const accountId = String(getLocatorValue(locator, ["account_id", "accountId"]) || folderRef.accountId || "").trim();
+    const folderPath = normalizeFolderPath(folderRef.path || "");
+    const from = normalizeLocatorAddress(getLocatorValue(locator, ["from", "from_addr", "author"]));
+    const subject = normalizeLocatorText(getLocatorValue(locator, ["subject"]));
+    const dateMs = parseRpcDateMs(getLocatorValue(locator, ["date", "received_at", "receivedAt"]));
+    const windowSeconds = toPositiveInt(
+        getLocatorValue(locator, ["window_seconds", "windowSeconds"]),
+        LOCATOR_SEARCH_DEFAULT_WINDOW_SECONDS,
+        24 * 60 * 60
+    );
+    const maxScan = toPositiveInt(
+        getLocatorValue(locator, ["max_scan", "maxScan"]),
+        LOCATOR_SEARCH_DEFAULT_MAX_SCAN,
+        LOCATOR_SEARCH_HARD_MAX_SCAN
+    );
+
+    if (!accountId || !folderPath || !from || !subject || dateMs === null) {
+        return {
+            message: null,
+            match: { strategy: "none", reason: "insufficient_locator_specificity" },
+            candidates_checked: candidatesChecked
+        };
+    }
+
+    const folder = await resolveRpcFolder(folderRef, accountId);
+    if (!folder) {
+        return {
+            message: null,
+            match: { strategy: "none", reason: "folder_not_found" },
+            candidates_checked: candidatesChecked
+        };
+    }
+
+    const matches = [];
+    const expected = { from, subject, dateMs, windowSeconds };
+    const pageSize = Math.max(50, Math.min(100, maxScan));
+    const cutoffMs = dateMs - (windowSeconds * 1000);
+    let scanned = 0;
+    for await (const message of iterateFolderMessagesSince(folder, cutoffMs, pageSize)) {
+        scanned += 1;
+        candidatesChecked += 1;
+        if (locatorMessageMatches(message, expected)) {
+            matches.push(message);
+            if (matches.length > 1) break;
+        }
+        if (scanned >= maxScan) break;
+    }
+
+    if (matches.length === 1) {
+        return {
+            message: minifyMessageHeader(matches[0]),
+            match: {
+                strategy: "folder_date_content",
+                account_id: accountId,
+                folder_path: normalizeFolderPath(folder.path || folderPath),
+                window_seconds: windowSeconds
+            },
+            candidates_checked: candidatesChecked
+        };
+    }
+
+    return {
+        message: null,
+        match: {
+            strategy: "none",
+            reason: matches.length > 1 ? "ambiguous_locator" : "not_found"
+        },
+        candidates_checked: candidatesChecked
+    };
+}
+
 function parseRpcDateMs(value) {
     if (value == null) return null;
     if (typeof value === "number" && Number.isFinite(value)) return value;
@@ -2380,6 +2551,9 @@ async function cortexRpc(methodPath, args) {
                 full,
                 state: buildTbState(message)
             };
+        }
+        case "cortex.messages.findByLocator": {
+            return await findMessageByLocator(args[0] || {});
         }
         case "cortex.messages.getStateAuditByHeaderId": {
             return await getStateAuditByHeaderId(args[0]);
