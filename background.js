@@ -1759,6 +1759,7 @@ function filterMessagesByScope(messages, expectedAccountId = "", expectedFolderP
 }
 
 const LOCATOR_SEARCH_DEFAULT_WINDOW_SECONDS = 6 * 60 * 60;
+const LOCATOR_SEARCH_HARD_MAX_WINDOW_SECONDS = 7 * 24 * 60 * 60;
 const LOCATOR_SEARCH_DEFAULT_MAX_SCAN = 200;
 const LOCATOR_SEARCH_HARD_MAX_SCAN = 500;
 
@@ -1865,7 +1866,7 @@ async function findMessageByLocator(locator) {
     const windowSeconds = toPositiveInt(
         getLocatorValue(locator, ["window_seconds", "windowSeconds"]),
         LOCATOR_SEARCH_DEFAULT_WINDOW_SECONDS,
-        24 * 60 * 60
+        LOCATOR_SEARCH_HARD_MAX_WINDOW_SECONDS
     );
     const maxScan = toPositiveInt(
         getLocatorValue(locator, ["max_scan", "maxScan"]),

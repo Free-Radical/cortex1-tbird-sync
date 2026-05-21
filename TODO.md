@@ -8,6 +8,7 @@
 - [ ] `forwarded` and `replied` status not available via Thunderbird WebExtension API — only readable from X-Mozilla-Status headers in mbox files (may be stale until folder compact)
 
 ## Done
+- [x] Locator fallback honors core's bounded 7-day recovery window
 - [x] Preserve queued Thunderbird event pushes across temporary WebSocket disconnects
 - [x] Rebuild and guard packaged XPI to include `cortex.messages.findByLocator` RPC implementation
 - [x] Add queued `delete` command support for single and batch c1server actions

@@ -207,6 +207,47 @@ describe("RPC Method Execution", () => {
             expect(messenger.messages.list).not.toHaveBeenCalled();
         });
 
+        it("should honor a requested 7-day locator fallback window", async () => {
+            const folder = createMockFolder({ accountId: "account1", path: "/INBOX" });
+            const recovered = createMockMessage({
+                id: 604800,
+                headerMessageId: "seven-day-recovered@example.com",
+                author: "Sender Name <sender@example.com>",
+                subject: "Recovered after rekey",
+                date: new Date("2026-05-14T14:00:00.000Z"),
+                folder
+            });
+            messenger.accounts.list.mockResolvedValue([
+                createMockAccount({ id: "account1", folders: [folder] })
+            ]);
+            messenger.messages.query
+                .mockResolvedValueOnce({ messages: [] })
+                .mockResolvedValueOnce({ messages: [recovered], id: null });
+
+            const result = await bg.executeRpcCommand({
+                method: "cortex.messages.findByLocator",
+                args: [{
+                    message_id: "stale-msg-id@example.com",
+                    account_id: "account1",
+                    folder_path: "/INBOX",
+                    from_addr: "sender@example.com",
+                    subject: "Recovered after rekey",
+                    received_at: "2026-05-21T14:00:00.000Z",
+                    window_seconds: 604800,
+                    max_scan: 20
+                }]
+            });
+
+            expect(result.success).toBe(true);
+            expect(result.result.message.id).toBe(604800);
+            expect(result.result.match.window_seconds).toBe(604800);
+            expect(messenger.messages.query).toHaveBeenNthCalledWith(2, {
+                folder,
+                fromDate: new Date("2026-05-14T14:00:00.000Z")
+            });
+            expect(messenger.messages.list).not.toHaveBeenCalled();
+        });
+
         it("should return none instead of guessing when fallback is ambiguous", async () => {
             const folder = createMockFolder({ accountId: "account1", path: "/INBOX" });
             const msg1 = createMockMessage({
