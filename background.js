@@ -774,6 +774,22 @@ async function postEventBatch(events) {
     return false;
 }
 
+function scheduleEventQueueRetry(error) {
+    eventQueueMeta.failures += 1;
+    const maxBackoff = 5 * 60 * 1000;
+    const nextBackoff = Math.min(maxBackoff, Math.max(1000, eventQueueMeta.backoffMs || 1000) * 2);
+
+    // If the endpoint isn't implemented yet (404/405), back off more aggressively to avoid constant retries.
+    if (error && (error.status === 404 || error.status === 405)) {
+        eventQueueMeta.backoffMs = Math.max(nextBackoff, 60 * 1000);
+    } else {
+        eventQueueMeta.backoffMs = nextBackoff;
+    }
+
+    eventQueueMeta.nextAttemptAtMs = Date.now() + eventQueueMeta.backoffMs;
+    schedulePersistQueue();
+}
+
 async function flushEventQueue() {
     if (isFlushingEvents) return;
     isFlushingEvents = true;
@@ -788,7 +804,11 @@ async function flushEventQueue() {
         if (eventQueueMeta.nextAttemptAtMs && now < eventQueueMeta.nextAttemptAtMs) return;
 
         const batch = eventQueue.slice(0, EVENT_BATCH_SIZE);
-        await postEventBatch(batch);
+        const sent = await postEventBatch(batch);
+        if (!sent) {
+            scheduleEventQueueRetry();
+            return;
+        }
 
         eventQueue.splice(0, batch.length);
         eventQueueMeta.failures = 0;
@@ -796,19 +816,7 @@ async function flushEventQueue() {
         eventQueueMeta.nextAttemptAtMs = 0;
         schedulePersistQueue();
     } catch (error) {
-        eventQueueMeta.failures += 1;
-        const maxBackoff = 5 * 60 * 1000;
-        const nextBackoff = Math.min(maxBackoff, Math.max(1000, eventQueueMeta.backoffMs || 1000) * 2);
-
-        // If the endpoint isn't implemented yet (404/405), back off more aggressively to avoid constant retries.
-        if (error && (error.status === 404 || error.status === 405)) {
-            eventQueueMeta.backoffMs = Math.max(nextBackoff, 60 * 1000);
-        } else {
-            eventQueueMeta.backoffMs = nextBackoff;
-        }
-
-        eventQueueMeta.nextAttemptAtMs = Date.now() + eventQueueMeta.backoffMs;
-        schedulePersistQueue();
+        scheduleEventQueueRetry(error);
     } finally {
         isFlushingEvents = false;
     }

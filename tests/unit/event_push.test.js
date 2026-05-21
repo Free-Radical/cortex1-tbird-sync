@@ -199,12 +199,14 @@ describe("Event Push System", () => {
         });
 
         it("should not flush when WS is closed", async () => {
+            const queuedEvents = [
+                { event_id: "evt-1", event_type: "test", ts_ms: Date.now(), seq: 1, payload: {} }
+            ];
+
             // WS is null by default (not connected)
             messenger._storage._setData({
                 cortex_event_push_enabled: true,
-                cortex_event_queue_v1: [
-                    { event_id: "evt-1", event_type: "test", ts_ms: Date.now(), seq: 1, payload: {} }
-                ],
+                cortex_event_queue_v1: queuedEvents,
                 cortex_event_queue_meta_v1: {}
             });
 
@@ -212,6 +214,11 @@ describe("Event Push System", () => {
             await bg.flushEventQueue();
 
             // postEventBatch returns false when WS not open — events stay queued
+            const lastPersist = messenger.storage.local.set.mock.calls.at(-1)[0];
+            expect(lastPersist.cortex_event_queue_v1).toEqual(queuedEvents);
+            expect(lastPersist.cortex_event_queue_meta_v1.failures).toBe(1);
+            expect(lastPersist.cortex_event_queue_meta_v1.backoffMs).toBe(2000);
+            expect(lastPersist.cortex_event_queue_meta_v1.nextAttemptAtMs).toBeGreaterThan(Date.now());
         });
 
         it("should remove flushed events from queue", async () => {
@@ -229,6 +236,32 @@ describe("Event Push System", () => {
             await bg.flushEventQueue();
 
             // Queue should be empty after successful flush
+        });
+
+        it("should not splice queued events when postEventBatch returns false", async () => {
+            const queuedEvents = [
+                { event_id: "evt-1", event_type: "test", ts_ms: Date.now(), seq: 1, payload: {} },
+                { event_id: "evt-2", event_type: "test", ts_ms: Date.now(), seq: 2, payload: {} }
+            ];
+
+            messenger._storage._setData({
+                cortex_event_push_enabled: true,
+                cortex_event_queue_v1: queuedEvents,
+                cortex_event_queue_meta_v1: {
+                    failures: 2,
+                    backoffMs: 8000,
+                    nextAttemptAtMs: 0
+                }
+            });
+
+            await bg.ensureEventQueueLoaded();
+            await bg.flushEventQueue();
+
+            const lastPersist = messenger.storage.local.set.mock.calls.at(-1)[0];
+            expect(lastPersist.cortex_event_queue_v1).toEqual(queuedEvents);
+            expect(lastPersist.cortex_event_queue_meta_v1.failures).toBe(3);
+            expect(lastPersist.cortex_event_queue_meta_v1.backoffMs).toBe(16000);
+            expect(lastPersist.cortex_event_queue_meta_v1.nextAttemptAtMs).toBeGreaterThan(Date.now());
         });
 
         it("should not flush when queue empty", async () => {
