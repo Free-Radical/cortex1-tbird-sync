@@ -1,5 +1,6 @@
 import json
 import re
+import zipfile
 from pathlib import Path
 
 
@@ -20,6 +21,14 @@ def test_build_includes_sent_folder_module_in_xpi():
     build_bat = _read("build.bat")
     assert "sent_folder_discovery.js" in build_bat
     assert "Compress-Archive" in build_bat
+
+
+def test_xpi_background_includes_locator_rpc_helpers():
+    with zipfile.ZipFile(REPO_ROOT / "cortex1-tbird-sync.xpi") as zf:
+        background = zf.read("background.js").decode("utf-8")
+
+    assert "cortex.messages.findByLocator" in background
+    assert "findMessageByLocator" in background
 
 
 def test_sent_folder_discovery_does_not_require_folder_id_field():
