@@ -248,6 +248,337 @@ describe("RPC Method Execution", () => {
             expect(messenger.messages.list).not.toHaveBeenCalled();
         });
 
+        it("should search saved folder path before fallback folder paths in order", async () => {
+            const inbox = createMockFolder({ accountId: "account1", path: "/INBOX", name: "Inbox" });
+            const archive = createMockFolder({ accountId: "account1", path: "/Archive", name: "Archive", specialUse: ["archive"] });
+            const sent = createMockFolder({ accountId: "account1", path: "/Sent", name: "Sent", specialUse: ["sent"] });
+            const recovered = createMockMessage({
+                id: 52001,
+                headerMessageId: "fallback-order@example.com",
+                author: "sender@example.com",
+                subject: "Fallback order",
+                date: new Date("2026-05-20T14:00:00.000Z"),
+                folder: sent
+            });
+            messenger.accounts.list.mockResolvedValue([
+                createMockAccount({ id: "account1", folders: [inbox, archive, sent] })
+            ]);
+            messenger.messages.query
+                .mockResolvedValueOnce({ messages: [] })
+                .mockResolvedValueOnce({ messages: [], id: null })
+                .mockResolvedValueOnce({ messages: [], id: null })
+                .mockResolvedValueOnce({ messages: [recovered], id: null });
+
+            const result = await bg.executeRpcCommand({
+                method: "cortex.messages.findByLocator",
+                args: [{
+                    message_id: "stale-fallback-order@example.com",
+                    account_id: "account1",
+                    folder_path: "/INBOX",
+                    fallback_folder_paths: ["/Archive", "/Sent"],
+                    from_addr: "sender@example.com",
+                    subject: "Fallback order",
+                    received_at: "2026-05-20T14:00:00.000Z",
+                    max_scan: 30
+                }]
+            });
+
+            expect(result.success).toBe(true);
+            expect(result.result.message.id).toBe(52001);
+            expect(result.result.match.folder_path).toBe("/Sent");
+            expect(result.result.match.source).toBe("fallback_folder_path");
+            expect(messenger.messages.query).toHaveBeenNthCalledWith(2, {
+                folder: inbox,
+                fromDate: new Date("2026-05-20T08:00:00.000Z")
+            });
+            expect(messenger.messages.query).toHaveBeenNthCalledWith(3, {
+                folder: archive,
+                fromDate: new Date("2026-05-20T08:00:00.000Z")
+            });
+            expect(messenger.messages.query).toHaveBeenNthCalledWith(4, {
+                folder: sent,
+                fromDate: new Date("2026-05-20T08:00:00.000Z")
+            });
+        });
+
+        it("should discover All Mail or archive folders only when requested", async () => {
+            const inbox = createMockFolder({ accountId: "account1", path: "/INBOX", name: "Inbox" });
+            const allMail = createMockFolder({ accountId: "account1", path: "/[Gmail]/All Mail", name: "All Mail", specialUse: ["archive"] });
+            const spam = createMockFolder({ accountId: "account1", path: "/Spam", name: "Spam", specialUse: ["junk"] });
+            const recovered = createMockMessage({
+                id: 52002,
+                author: "sender@example.com",
+                subject: "All Mail recovery",
+                date: new Date("2026-05-20T14:00:00.000Z"),
+                folder: allMail
+            });
+            messenger.accounts.list.mockResolvedValue([
+                createMockAccount({ id: "account1", folders: [inbox, allMail, spam] })
+            ]);
+            messenger.messages.query
+                .mockResolvedValueOnce({ messages: [], id: null })
+                .mockResolvedValueOnce({ messages: [recovered], id: null });
+
+            const result = await bg.executeRpcCommand({
+                method: "cortex.messages.findByLocator",
+                args: [{
+                    account_id: "account1",
+                    folder_path: "/INBOX",
+                    include_all_mail: true,
+                    from_addr: "sender@example.com",
+                    subject: "All Mail recovery",
+                    received_at: "2026-05-20T14:00:00.000Z"
+                }]
+            });
+
+            expect(result.success).toBe(true);
+            expect(result.result.message.id).toBe(52002);
+            expect(result.result.match.source).toBe("include_all_mail");
+            expect(messenger.messages.query).toHaveBeenCalledTimes(2);
+            expect(messenger.messages.query).not.toHaveBeenCalledWith(expect.objectContaining({ folder: spam }));
+        });
+
+        it("should not search Trash or Junk folders by default", async () => {
+            const inbox = createMockFolder({ accountId: "account1", path: "/INBOX", name: "Inbox" });
+            const trash = createMockFolder({ accountId: "account1", path: "/Trash", name: "Trash", specialUse: ["trash"] });
+            messenger.accounts.list.mockResolvedValue([
+                createMockAccount({ id: "account1", folders: [inbox, trash] })
+            ]);
+            messenger.messages.query.mockResolvedValue({ messages: [], id: null });
+
+            const result = await bg.executeRpcCommand({
+                method: "cortex.messages.findByLocator",
+                args: [{
+                    account_id: "account1",
+                    folder_path: "/INBOX",
+                    from_addr: "sender@example.com",
+                    subject: "Trash gated",
+                    received_at: "2026-05-20T14:00:00.000Z"
+                }]
+            });
+
+            expect(result.success).toBe(true);
+            expect(result.result.message).toBeNull();
+            expect(result.result.match.reason).toBe("not_found");
+            expect(messenger.messages.query).toHaveBeenCalledTimes(1);
+            expect(messenger.messages.query).not.toHaveBeenCalledWith(expect.objectContaining({ folder: trash }));
+        });
+
+        it("should include Trash or Junk account folders when requested", async () => {
+            const inbox = createMockFolder({ accountId: "account1", path: "/INBOX", name: "Inbox" });
+            const junk = createMockFolder({ accountId: "account1", path: "/Junk", name: "Junk", specialUse: ["junk"] });
+            const recovered = createMockMessage({
+                id: 52003,
+                author: "sender@example.com",
+                subject: "Junk recovery",
+                date: new Date("2026-05-20T14:00:00.000Z"),
+                folder: junk
+            });
+            messenger.accounts.list.mockResolvedValue([
+                createMockAccount({ id: "account1", folders: [inbox, junk] })
+            ]);
+            messenger.messages.query
+                .mockResolvedValueOnce({ messages: [], id: null })
+                .mockResolvedValueOnce({ messages: [recovered], id: null });
+
+            const result = await bg.executeRpcCommand({
+                method: "cortex.messages.findByLocator",
+                args: [{
+                    account_id: "account1",
+                    folder_path: "/INBOX",
+                    includeTrash: true,
+                    from_addr: "sender@example.com",
+                    subject: "Junk recovery",
+                    received_at: "2026-05-20T14:00:00.000Z"
+                }]
+            });
+
+            expect(result.success).toBe(true);
+            expect(result.result.message.id).toBe(52003);
+            expect(result.result.match.source).toBe("include_trash");
+        });
+
+        it("should use unique recipient evidence to resolve fallback ambiguity", async () => {
+            const folder = createMockFolder({ accountId: "account1", path: "/INBOX" });
+            const wrongRecipient = createMockMessage({
+                id: 52004,
+                author: "Sender Name <sender@example.com>",
+                subject: "Recipient tie",
+                recipients: ["other@example.com"],
+                date: new Date("2026-05-20T14:01:00.000Z"),
+                folder
+            });
+            const rightRecipient = createMockMessage({
+                id: 52005,
+                author: "sender@example.com",
+                subject: "Recipient tie",
+                recipients: ["Target Person <target@example.com>"],
+                date: new Date("2026-05-20T14:02:00.000Z"),
+                folder
+            });
+            messenger.accounts.list.mockResolvedValue([
+                createMockAccount({ id: "account1", folders: [folder] })
+            ]);
+            messenger.messages.query.mockResolvedValue({ messages: [wrongRecipient, rightRecipient], id: null });
+
+            const result = await bg.executeRpcCommand({
+                method: "cortex.messages.findByLocator",
+                args: [{
+                    account_id: "account1",
+                    folder_path: "/INBOX",
+                    from_addr: "sender@example.com",
+                    subject: "Recipient tie",
+                    received_at: "2026-05-20T14:00:00.000Z",
+                    to_addr: "target@example.com"
+                }]
+            });
+
+            expect(result.success).toBe(true);
+            expect(result.result.message.id).toBe(52005);
+            expect(result.result.match.strategy).toBe("folder_date_content_recipient");
+            expect(result.result.match.evidence).toBe("recipient_or_cc");
+        });
+
+        it("should fail closed when primary and fallback folders both have content matches", async () => {
+            const inbox = createMockFolder({ accountId: "account1", path: "/INBOX", name: "Inbox" });
+            const archive = createMockFolder({ accountId: "account1", path: "/Archive", name: "Archive", specialUse: ["archive"] });
+            const primaryMatch = createMockMessage({
+                id: 52008,
+                author: "sender@example.com",
+                subject: "Cross-folder ambiguity",
+                date: new Date("2026-05-20T14:01:00.000Z"),
+                folder: inbox
+            });
+            const fallbackMatch = createMockMessage({
+                id: 52009,
+                author: "Sender Name <sender@example.com>",
+                subject: "Cross-folder ambiguity",
+                date: new Date("2026-05-20T14:02:00.000Z"),
+                folder: archive
+            });
+            messenger.accounts.list.mockResolvedValue([
+                createMockAccount({ id: "account1", folders: [inbox, archive] })
+            ]);
+            messenger.messages.query
+                .mockResolvedValueOnce({ messages: [primaryMatch], id: null })
+                .mockResolvedValueOnce({ messages: [fallbackMatch], id: null });
+
+            const result = await bg.executeRpcCommand({
+                method: "cortex.messages.findByLocator",
+                args: [{
+                    account_id: "account1",
+                    folder_path: "/INBOX",
+                    fallback_folder_paths: ["/Archive"],
+                    from_addr: "sender@example.com",
+                    subject: "Cross-folder ambiguity",
+                    received_at: "2026-05-20T14:00:00.000Z",
+                    max_scan: 20
+                }]
+            });
+
+            expect(result.success).toBe(true);
+            expect(result.result.message).toBeNull();
+            expect(result.result.match).toEqual({
+                strategy: "none",
+                reason: "ambiguous_locator"
+            });
+            expect(result.result.candidates_checked).toBe(2);
+            expect(messenger.messages.query).toHaveBeenCalledTimes(2);
+        });
+
+        it("should use unique recipient evidence to select across different folders", async () => {
+            const inbox = createMockFolder({ accountId: "account1", path: "/INBOX", name: "Inbox" });
+            const archive = createMockFolder({ accountId: "account1", path: "/Archive", name: "Archive", specialUse: ["archive"] });
+            const primaryMatch = createMockMessage({
+                id: 52010,
+                author: "sender@example.com",
+                subject: "Cross-folder recipient tie",
+                recipients: ["other@example.com"],
+                date: new Date("2026-05-20T14:01:00.000Z"),
+                folder: inbox
+            });
+            const fallbackMatch = createMockMessage({
+                id: 52011,
+                author: "Sender Name <sender@example.com>",
+                subject: "Cross-folder recipient tie",
+                recipients: ["Target Person <target@example.com>"],
+                date: new Date("2026-05-20T14:02:00.000Z"),
+                folder: archive
+            });
+            messenger.accounts.list.mockResolvedValue([
+                createMockAccount({ id: "account1", folders: [inbox, archive] })
+            ]);
+            messenger.messages.query
+                .mockResolvedValueOnce({ messages: [primaryMatch], id: null })
+                .mockResolvedValueOnce({ messages: [fallbackMatch], id: null });
+
+            const result = await bg.executeRpcCommand({
+                method: "cortex.messages.findByLocator",
+                args: [{
+                    account_id: "account1",
+                    folder_path: "/INBOX",
+                    fallback_folder_paths: ["/Archive"],
+                    from_addr: "sender@example.com",
+                    subject: "Cross-folder recipient tie",
+                    received_at: "2026-05-20T14:00:00.000Z",
+                    to_addr: "target@example.com",
+                    max_scan: 20
+                }]
+            });
+
+            expect(result.success).toBe(true);
+            expect(result.result.message.id).toBe(52011);
+            expect(result.result.match.strategy).toBe("folder_date_content_recipient");
+            expect(result.result.match.folder_path).toBe("/Archive");
+            expect(result.result.match.source).toBe("fallback_folder_path");
+            expect(result.result.match.evidence).toBe("recipient_or_cc");
+            expect(result.result.candidates_checked).toBe(2);
+            expect(messenger.messages.query).toHaveBeenCalledTimes(2);
+        });
+
+        it("should remain ambiguous when cc evidence does not uniquely select a match", async () => {
+            const folder = createMockFolder({ accountId: "account1", path: "/INBOX" });
+            const msg1 = createMockMessage({
+                id: 52006,
+                author: "sender@example.com",
+                subject: "CC tie",
+                ccList: ["team@example.com"],
+                date: new Date("2026-05-20T14:01:00.000Z"),
+                folder
+            });
+            const msg2 = createMockMessage({
+                id: 52007,
+                author: "sender@example.com",
+                subject: "CC tie",
+                ccList: ["Team <team@example.com>"],
+                date: new Date("2026-05-20T14:02:00.000Z"),
+                folder
+            });
+            messenger.accounts.list.mockResolvedValue([
+                createMockAccount({ id: "account1", folders: [folder] })
+            ]);
+            messenger.messages.query.mockResolvedValue({ messages: [msg1, msg2], id: null });
+
+            const result = await bg.executeRpcCommand({
+                method: "cortex.messages.findByLocator",
+                args: [{
+                    account_id: "account1",
+                    folder_path: "/INBOX",
+                    from_addr: "sender@example.com",
+                    subject: "CC tie",
+                    received_at: "2026-05-20T14:00:00.000Z",
+                    ccAddr: "team@example.com"
+                }]
+            });
+
+            expect(result.success).toBe(true);
+            expect(result.result.message).toBeNull();
+            expect(result.result.match).toEqual({
+                strategy: "none",
+                reason: "ambiguous_locator"
+            });
+        });
+
         it("should return none instead of guessing when fallback is ambiguous", async () => {
             const folder = createMockFolder({ accountId: "account1", path: "/INBOX" });
             const msg1 = createMockMessage({

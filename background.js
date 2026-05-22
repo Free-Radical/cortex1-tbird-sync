@@ -1808,6 +1808,20 @@ function getLocatorValue(locator, keys) {
     return "";
 }
 
+function getLocatorBoolean(locator, keys) {
+    for (const key of keys) {
+        const value = locator && locator[key];
+        if (value === true) return true;
+        if (value === false) return false;
+        if (typeof value === "string" && value.trim()) {
+            const normalized = value.trim().toLowerCase();
+            if (["1", "true", "yes", "y"].includes(normalized)) return true;
+            if (["0", "false", "no", "n"].includes(normalized)) return false;
+        }
+    }
+    return false;
+}
+
 function buildLocatorFolderRef(locator) {
     const folderValue = getLocatorValue(locator, ["folder_path", "folderPath"]);
     const folder = locator && locator.folder;
@@ -1826,6 +1840,147 @@ function buildLocatorFolderRef(locator) {
     return { accountId, path: folderValue };
 }
 
+function normalizeLocatorFolderRef(value, accountIdHint = "") {
+    let accountId = accountIdHint ? String(accountIdHint) : "";
+    let path = "";
+    let name = "";
+
+    if (typeof value === "string") {
+        const parsed = parseAccountFolderId(value);
+        if (parsed) {
+            accountId = parsed.accountId || accountId;
+            path = parsed.folderPath;
+        } else {
+            path = normalizeFolderPath(value);
+        }
+    } else if (value && typeof value === "object") {
+        const parsed = parseAccountFolderId(value.id);
+        if (parsed) {
+            accountId = parsed.accountId || accountId;
+            path = parsed.folderPath;
+        }
+        if (value.accountId != null && String(value.accountId).trim()) {
+            accountId = String(value.accountId).trim();
+        }
+        if (!path && typeof value.path === "string") {
+            path = normalizeFolderPath(value.path);
+        }
+        if (!path && typeof value.folder_path === "string") {
+            path = normalizeFolderPath(value.folder_path);
+        }
+        if (!path && typeof value.folderPath === "string") {
+            path = normalizeFolderPath(value.folderPath);
+        }
+        if (typeof value.name === "string") {
+            name = value.name.trim();
+            if (!path) path = normalizeFolderPath(name);
+        }
+    }
+
+    return { accountId, path, name };
+}
+
+function getLocatorFallbackFolderRefs(locator, accountIdHint = "") {
+    const out = [];
+    const values = [];
+    for (const key of ["fallback_folder_paths", "fallbackFolderPaths", "fallback_folders", "fallbackFolders"]) {
+        const value = locator && locator[key];
+        if (Array.isArray(value)) values.push(...value);
+    }
+    for (const value of values) {
+        const ref = normalizeLocatorFolderRef(value, accountIdHint);
+        if (ref.path || ref.name) out.push(ref);
+    }
+    return out;
+}
+
+function getFolderComparableParts(folder) {
+    const parts = [];
+    if (!folder || typeof folder !== "object") return parts;
+    for (const key of ["path", "name", "type"]) {
+        if (folder[key] != null) parts.push(String(folder[key]).toLowerCase());
+    }
+    const specialUse = Array.isArray(folder.specialUse) ? folder.specialUse : [];
+    for (const tag of specialUse) parts.push(String(tag || "").toLowerCase());
+    return parts;
+}
+
+function isTrashOrJunkFolder(folder) {
+    const joined = getFolderComparableParts(folder).join(" ");
+    if (!joined) return false;
+    return (
+        /(^|[\/\s_-])trash($|[\/\s_-])/.test(joined) ||
+        /(^|[\/\s_-])deleted(\s+items?)?($|[\/\s_-])/.test(joined) ||
+        /(^|[\/\s_-])junk($|[\/\s_-])/.test(joined) ||
+        /(^|[\/\s_-])spam($|[\/\s_-])/.test(joined)
+    );
+}
+
+function isAllMailOrArchiveFolder(folder) {
+    const joined = getFolderComparableParts(folder).join(" ");
+    if (!joined) return false;
+    return (
+        joined.includes("all mail") ||
+        /(^|[\/\s_-])allmail($|[\/\s_-])/.test(joined) ||
+        /(^|[\/\s_-])all_mail($|[\/\s_-])/.test(joined) ||
+        /(^|[\/\s_-])archive(s)?($|[\/\s_-])/.test(joined)
+    );
+}
+
+function folderMatchesLocatorRef(folder, ref) {
+    if (!folder || !ref) return false;
+    if (ref.accountId && String(folder.accountId || "") !== String(ref.accountId)) return false;
+    const targetPath = normalizeFolderPath(ref.path || "").toLowerCase();
+    const targetName = String(ref.name || "").trim().toLowerCase();
+    const folderPath = normalizeFolderPath(folder.path || "").toLowerCase();
+    const folderName = String(folder.name || "").trim().toLowerCase();
+    if (targetPath && (folderPath === targetPath || folderName === targetPath.replace(/^\//, ""))) return true;
+    if (targetName && (folderName === targetName || folderPath === normalizeFolderPath(targetName).toLowerCase())) return true;
+    return false;
+}
+
+function appendLocatorSearchFolder(out, seen, folder, source, explicit) {
+    if (!folder || typeof folder !== "object") return;
+    const key = `${String(folder.accountId || "")}:${normalizeFolderPath(folder.path || folder.name || "").toLowerCase()}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    out.push({ folder, source, explicit: explicit === true });
+}
+
+async function buildLocatorSearchFolders(locator, accountId, primaryFolderRef) {
+    const includeAllMail = getLocatorBoolean(locator, ["include_all_mail", "includeAllMail"]);
+    const includeTrash = getLocatorBoolean(locator, ["include_trash", "includeTrash"]);
+    const fallbackRefs = getLocatorFallbackFolderRefs(locator, accountId);
+    const accountFolders = accountId ? await getAccountFolders(accountId) : [];
+    const out = [];
+    const seen = new Set();
+
+    const resolveRef = async (ref, source) => {
+        if (!ref || (!ref.path && !ref.name)) return;
+        const accountScopedRef = { ...ref, accountId: ref.accountId || accountId };
+        const treeMatch = accountFolders.find((folder) => folderMatchesLocatorRef(folder, accountScopedRef));
+        const folder = treeMatch || await resolveRpcFolder(accountScopedRef, accountScopedRef.accountId || accountId);
+        if (folder) appendLocatorSearchFolder(out, seen, folder, source, true);
+    };
+
+    await resolveRef(normalizeLocatorFolderRef(primaryFolderRef, accountId), "folder_path");
+    for (const ref of fallbackRefs) {
+        await resolveRef(ref, "fallback_folder_path");
+    }
+
+    for (const folder of accountFolders) {
+        if (isTrashOrJunkFolder(folder)) {
+            if (includeTrash) appendLocatorSearchFolder(out, seen, folder, "include_trash", false);
+            continue;
+        }
+        if (includeAllMail && isAllMailOrArchiveFolder(folder)) {
+            appendLocatorSearchFolder(out, seen, folder, "include_all_mail", false);
+        }
+    }
+
+    return out;
+}
+
 function locatorMessageMatches(message, expected) {
     if (!message || typeof message !== "object") return false;
     if (normalizeLocatorAddress(message.author) !== expected.from) return false;
@@ -1833,6 +1988,94 @@ function locatorMessageMatches(message, expected) {
     const msgDateMs = getMessageDateMs(message);
     if (msgDateMs === null) return false;
     return Math.abs(msgDateMs - expected.dateMs) <= expected.windowSeconds * 1000;
+}
+
+function normalizeLocatorAddressList(value) {
+    const values = Array.isArray(value) ? value : [value];
+    const out = [];
+    const seen = new Set();
+    for (const item of values) {
+        if (item == null) continue;
+        const text = String(item).trim();
+        if (!text) continue;
+        const emails = text.match(/[\w.!#$%&'*+/=?^`{|}~-]+@[\w.-]+/g);
+        const candidates = emails && emails.length ? emails : [text];
+        for (const candidate of candidates) {
+            const clean = normalizeLocatorAddress(candidate);
+            if (!clean || seen.has(clean)) continue;
+            seen.add(clean);
+            out.push(clean);
+        }
+    }
+    return out;
+}
+
+function getLocatorAddressList(locator, keys) {
+    for (const key of keys) {
+        const value = locator && locator[key];
+        const addresses = normalizeLocatorAddressList(value);
+        if (addresses.length) return addresses;
+    }
+    return [];
+}
+
+function messageHasAnyAddress(messageValue, expectedValues) {
+    if (!expectedValues || expectedValues.length === 0) return false;
+    const actual = new Set(normalizeLocatorAddressList(messageValue));
+    return expectedValues.some((value) => actual.has(value));
+}
+
+function selectLocatorRecipientTieBreaker(matches, expected) {
+    if (!expected.to.length && !expected.cc.length) return null;
+    const evidenceMatches = matches.filter((message) => (
+        messageHasAnyAddress(message.recipients, expected.to) ||
+        messageHasAnyAddress(message.ccList, expected.cc)
+    ));
+    return evidenceMatches.length === 1 ? evidenceMatches[0] : null;
+}
+
+async function scanLocatorFolder(folderEntry, expected, cutoffMs, pageSize, maxScan) {
+    const matches = [];
+    let scanned = 0;
+
+    for await (const message of iterateFolderMessagesSince(folderEntry.folder, cutoffMs, pageSize)) {
+        scanned += 1;
+        if (locatorMessageMatches(message, expected)) {
+            matches.push({ message, folderEntry });
+        }
+        if (scanned >= maxScan) break;
+    }
+
+    return { matches, scanned };
+}
+
+function buildLocatorContentMatch(message, folderEntry, folderPath, windowSeconds, evidence = null) {
+    const match = {
+        strategy: evidence ? "folder_date_content_recipient" : "folder_date_content",
+        account_id: String(message.folder && message.folder.accountId || folderEntry.folder.accountId || ""),
+        folder_path: normalizeFolderPath(
+            message.folder && message.folder.path || folderEntry.folder.path || folderPath
+        ),
+        source: folderEntry.source,
+        window_seconds: windowSeconds
+    };
+    if (evidence) match.evidence = evidence;
+    return match;
+}
+
+function selectLocatorMatchAcrossFolders(matches, expected) {
+    if (matches.length === 1) {
+        return { status: "found", match: matches[0], evidence: null };
+    }
+    if (matches.length > 1) {
+        const tied = selectLocatorRecipientTieBreaker(matches.map((item) => item.message), expected);
+        if (tied) {
+            const selected = matches.find((item) => item.message === tied);
+            if (selected) return { status: "found", match: selected, evidence: "recipient_or_cc" };
+        }
+        return { status: "ambiguous" };
+    }
+    return { status: "not_found" };
 }
 
 async function findMessageByLocator(locator) {
@@ -1863,6 +2106,8 @@ async function findMessageByLocator(locator) {
     const from = normalizeLocatorAddress(getLocatorValue(locator, ["from", "from_addr", "author"]));
     const subject = normalizeLocatorText(getLocatorValue(locator, ["subject"]));
     const dateMs = parseRpcDateMs(getLocatorValue(locator, ["date", "received_at", "receivedAt"]));
+    const to = getLocatorAddressList(locator, ["to_addr", "toAddr"]);
+    const cc = getLocatorAddressList(locator, ["cc_addr", "ccAddr"]);
     const windowSeconds = toPositiveInt(
         getLocatorValue(locator, ["window_seconds", "windowSeconds"]),
         LOCATOR_SEARCH_DEFAULT_WINDOW_SECONDS,
@@ -1873,8 +2118,14 @@ async function findMessageByLocator(locator) {
         LOCATOR_SEARCH_DEFAULT_MAX_SCAN,
         LOCATOR_SEARCH_HARD_MAX_SCAN
     );
+    const hasFolderSearchScope = (
+        Boolean(folderPath) ||
+        getLocatorFallbackFolderRefs(locator, accountId).length > 0 ||
+        getLocatorBoolean(locator, ["include_all_mail", "includeAllMail"]) ||
+        getLocatorBoolean(locator, ["include_trash", "includeTrash"])
+    );
 
-    if (!accountId || !folderPath || !from || !subject || dateMs === null) {
+    if (!accountId || !hasFolderSearchScope || !from || !subject || dateMs === null) {
         return {
             message: null,
             match: { strategy: "none", reason: "insufficient_locator_specificity" },
@@ -1882,8 +2133,8 @@ async function findMessageByLocator(locator) {
         };
     }
 
-    const folder = await resolveRpcFolder(folderRef, accountId);
-    if (!folder) {
+    const searchFolders = await buildLocatorSearchFolders(locator, accountId, folderRef);
+    if (!searchFolders.length) {
         return {
             message: null,
             match: { strategy: "none", reason: "folder_not_found" },
@@ -1891,29 +2142,39 @@ async function findMessageByLocator(locator) {
         };
     }
 
-    const matches = [];
-    const expected = { from, subject, dateMs, windowSeconds };
+    const expected = { from, subject, dateMs, windowSeconds, to, cc };
     const pageSize = Math.max(50, Math.min(100, maxScan));
     const cutoffMs = dateMs - (windowSeconds * 1000);
-    let scanned = 0;
-    for await (const message of iterateFolderMessagesSince(folder, cutoffMs, pageSize)) {
-        scanned += 1;
-        candidatesChecked += 1;
-        if (locatorMessageMatches(message, expected)) {
-            matches.push(message);
-            if (matches.length > 1) break;
-        }
-        if (scanned >= maxScan) break;
+    let remainingScan = maxScan;
+    const matches = [];
+    for (const folderEntry of searchFolders) {
+        if (remainingScan <= 0) break;
+        const scan = await scanLocatorFolder(folderEntry, expected, cutoffMs, pageSize, remainingScan);
+        candidatesChecked += scan.scanned;
+        remainingScan -= scan.scanned;
+        matches.push(...scan.matches);
     }
 
-    if (matches.length === 1) {
+    const selection = selectLocatorMatchAcrossFolders(matches, expected);
+    if (selection.status === "found") {
         return {
-            message: minifyMessageHeader(matches[0]),
+            message: minifyMessageHeader(selection.match.message),
+            match: buildLocatorContentMatch(
+                selection.match.message,
+                selection.match.folderEntry,
+                folderPath,
+                windowSeconds,
+                selection.evidence
+            ),
+            candidates_checked: candidatesChecked
+        };
+    }
+    if (selection.status === "ambiguous") {
+        return {
+            message: null,
             match: {
-                strategy: "folder_date_content",
-                account_id: accountId,
-                folder_path: normalizeFolderPath(folder.path || folderPath),
-                window_seconds: windowSeconds
+                strategy: "none",
+                reason: "ambiguous_locator"
             },
             candidates_checked: candidatesChecked
         };
@@ -1923,7 +2184,7 @@ async function findMessageByLocator(locator) {
         message: null,
         match: {
             strategy: "none",
-            reason: matches.length > 1 ? "ambiguous_locator" : "not_found"
+            reason: "not_found"
         },
         candidates_checked: candidatesChecked
     };

@@ -101,6 +101,7 @@ Bidirectional WebSocket for real-time communication.
 
 | RPC method | Description |
 |------------|-------------|
+| `cortex.messages.findByLocator` | Resolve by Message-ID candidates first, then bounded sender/subject/date scans of saved and fallback folders. All Mail and Trash/Junk discovery are opt-in, and recipient/CC evidence only breaks ambiguity when it selects one match. |
 | `cortex.messages.getFullByHeaderId` | Resolve a message by RFC `Message-ID`, return Thunderbird `messages.getFull()` plus current canonical `tb_state`. |
 | `cortex.messages.getRawByHeaderId` | Resolve a message by RFC `Message-ID`, return Thunderbird `messages.getRaw()` source. |
 | `cortex.messages.getStateAuditByHeaderId` | Resolve a message by RFC `Message-ID`, return canonical `tb_state`, raw JSON-safe Thunderbird snapshots, missing live API fields, and every known attribute class that is exposed but not synced bidirectionally. |

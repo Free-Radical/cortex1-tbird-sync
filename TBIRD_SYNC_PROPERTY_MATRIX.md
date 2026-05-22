@@ -63,6 +63,7 @@ This file describes what `cortex1-tbird-sync` exposes today. It is intentionally
 | `set_tags` | C1 -> Thunderbird | Supported for tag keys. |
 | `archive`, `move`, `delete` | C1 -> Thunderbird | Supported. Moved/archived messages may return `tb_state: null` if Thunderbird changes the internal id before refetch. |
 | `cortex.messages.updateByHeaderId` | C1 -> Thunderbird | Generic update for Thunderbird-supported `MessageProperties`; caller must avoid unsupported properties. |
+| `cortex.messages.findByLocator` | Thunderbird -> C1 | Resolves by Message-ID candidates first, then bounded sender/subject/date scans of saved and fallback folders. Optional All Mail/Trash discovery is opt-in, and recipient/CC evidence is only used to break otherwise ambiguous matches when unique. |
 | `cortex.messages.getFullByHeaderId` | Thunderbird -> C1 | Returns raw `getFull()` payload plus canonical `state`. |
 | `cortex.messages.getRawByHeaderId` | Thunderbird -> C1 | Returns raw message source. |
 | `cortex.messages.getStateAuditByHeaderId` | Thunderbird -> C1 | Returns normalized state, audited capabilities, best-effort attachment/calendar manifests, and explicit unsupported-property notes. |
