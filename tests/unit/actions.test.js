@@ -5,7 +5,7 @@
  * mark_read, mark_unread, set_flagged, set_junk, open_message, archive, delete,
  * move, bulk_mark_read, create_draft, send_reply, get_status,
  * bulk_get_status, list_folders, rpc, backfill_replied_forwarded,
- * set_tags, sync_state, bulk_sync_state
+ * set_tags, recover_body, sync_state, bulk_sync_state
  */
 
 const { createMockMessage, createMockFolder, createMockAccount, loadBackgroundScript } = require("../setup");
@@ -869,6 +869,56 @@ describe("Action Handlers", () => {
 
             expect(result.success).toBe(true);
             expect(result.action).toBe("sync_state");
+        });
+    });
+
+    // =========================================================================
+    // recover_body
+    // =========================================================================
+    describe("recover_body action", () => {
+        it("should send recovered full body via websocket event", async () => {
+            const mockWs = { readyState: 1, send: jest.fn() };
+            bg._setWs(mockWs);
+            messenger.messages.getFull.mockResolvedValue({
+                parts: [
+                    { contentType: "text/plain", body: "Recovered plain body" },
+                    { contentType: "text/html", body: "<p>Recovered html body</p>" }
+                ]
+            });
+
+            const result = await bg.processCommand({
+                action: "recover_body",
+                messageId: "test-msg-id@example.com",
+                recordId: "rec-123"
+            });
+
+            expect(result.success).toBe(true);
+            expect(result.action).toBe("recover_body");
+            expect(result.body_sent).toBe(true);
+            expect(messenger.messages.getFull).toHaveBeenCalledWith(mockMsg.id);
+            expect(mockWs.send).toHaveBeenCalledTimes(1);
+            const frame = JSON.parse(mockWs.send.mock.calls[0][0]);
+            expect(frame.type).toBe("event");
+            expect(frame.event.type).toBe("email_body_recovered");
+            expect(frame.event.record_id).toBe("rec-123");
+            expect(frame.event.message_id).toBe("test-msg-id@example.com");
+            expect(frame.event.body_text).toBe("Recovered plain body");
+            expect(frame.event.body_html).toBe("<p>Recovered html body</p>");
+        });
+
+        it("should fail without sending when Thunderbird returns no body", async () => {
+            const mockWs = { readyState: 1, send: jest.fn() };
+            bg._setWs(mockWs);
+            messenger.messages.getFull.mockResolvedValue({ parts: [] });
+
+            const result = await bg.processCommand({
+                action: "recover_body",
+                messageId: "test-msg-id@example.com"
+            });
+
+            expect(result.success).toBe(false);
+            expect(result.error).toContain("No body content");
+            expect(mockWs.send).not.toHaveBeenCalled();
         });
     });
 

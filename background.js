@@ -578,6 +578,7 @@ const TBIRD_SYNC_STATE_CAPABILITIES = {
         "bulk_get_status",
         "sync_state",
         "bulk_sync_state",
+        "recover_body",
         "cortex.findMessageByHeaderId",
         "cortex.messages.getFullByHeaderId",
         "cortex.messages.findByLocator",
@@ -1365,6 +1366,79 @@ function buildAttachmentManifestFromFull(full) {
 
     visit(full, "");
     return attachments;
+}
+
+function extractBodyFromFull(full) {
+    let bodyText = "";
+    let bodyHtml = "";
+
+    const visit = (part) => {
+        if (!part || typeof part !== "object") return;
+        const body = typeof part.body === "string" ? part.body : "";
+        const contentType = String(part.contentType || part.content_type || "").toLowerCase();
+        if (body) {
+            if (!bodyHtml && contentType.includes("html")) {
+                bodyHtml = body;
+            } else if (!bodyText && (contentType.includes("plain") || !contentType)) {
+                bodyText = body;
+            } else if (!bodyText) {
+                bodyText = body;
+            }
+        }
+        const children = Array.isArray(part.parts) ? part.parts : [];
+        children.forEach(visit);
+    };
+
+    visit(full);
+    if (!bodyText && !bodyHtml && full && typeof full.body === "string") {
+        bodyText = full.body;
+    }
+    return { body_text: bodyText, body_html: bodyHtml };
+}
+
+async function handleRecoverBody(cmd) {
+    const messageId = cmd.messageId || cmd.message_id;
+    if (!messageId) {
+        return { success: false, action: "recover_body", error: "messageId required" };
+    }
+    const message = await findMessageByHeaderId(messageId);
+    if (!message) {
+        return { success: false, action: "recover_body", messageId, error: `Message not found: ${messageId}` };
+    }
+
+    const full = await messenger.messages.getFull(message.id);
+    const body = extractBodyFromFull(full);
+    if (!body.body_text && !body.body_html) {
+        return { success: false, action: "recover_body", messageId, error: "No body content returned by Thunderbird" };
+    }
+
+    const folder = message.folder || {};
+    const event = {
+        type: "email_body_recovered",
+        record_id: cmd.recordId || cmd.record_id || "",
+        message_id: message.headerMessageId || messageId,
+        messageId: message.headerMessageId || messageId,
+        body_text: body.body_text,
+        body_html: body.body_html,
+        subject: message.subject || "",
+        from: message.author || "",
+        date: message.date ? new Date(message.date).toISOString() : null,
+        account_id: folder.accountId || "",
+        folder_path: folder.path || "",
+        read: Boolean(message.read),
+        flagged: Boolean(message.flagged),
+        junk: Boolean(message.junk),
+        tags: Array.isArray(message.tags) ? message.tags : []
+    };
+    const sent = sendWebSocketMessage({ type: "event", event, data: event });
+    return {
+        success: sent,
+        action: "recover_body",
+        messageId,
+        recordId: event.record_id || null,
+        body_sent: sent,
+        error: sent ? undefined : "WebSocket is not connected"
+    };
 }
 
 async function getStateAuditByHeaderId(headerMessageId) {
@@ -3577,6 +3651,8 @@ async function processCommand(cmd) {
                 count: states.length
             };
         }
+        case "recover_body":
+            return await handleRecoverBody(cmd);
         case "cancel_job": {
             const targetJobId = cmd.job_id || "";
             if (targetJobId) {
@@ -4424,6 +4500,8 @@ if (typeof module !== "undefined" && module && module.exports) {
         safeAuditValue,
         listMissingFields,
         buildAttachmentManifestFromFull,
+        extractBodyFromFull,
+        handleRecoverBody,
         getStateAuditByHeaderId,
         TBIRD_NOT_BIDIRECTIONALLY_SYNCED_ATTRIBUTES,
         findMessageByHeaderId,
