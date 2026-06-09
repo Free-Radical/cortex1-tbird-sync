@@ -31,6 +31,27 @@ def test_xpi_background_includes_locator_rpc_helpers():
     assert "findMessageByLocator" in background
 
 
+def test_xpi_contains_current_source_files():
+    """The shipped XPI must not lag behind the source files it packages."""
+    expected_files = ("manifest.json", "sent_folder_discovery.js", "background.js")
+    with zipfile.ZipFile(REPO_ROOT / "cortex1-tbird-sync.xpi") as zf:
+        for rel_path in expected_files:
+            packaged = zf.read(rel_path).decode("utf-8").replace("\r\n", "\n")
+            source = _read(rel_path).replace("\r\n", "\n")
+            assert packaged == source
+
+
+def test_xpi_background_includes_recover_body_action():
+    with zipfile.ZipFile(REPO_ROOT / "cortex1-tbird-sync.xpi") as zf:
+        background = zf.read("background.js").decode("utf-8")
+
+    assert '"recover_body"' in background
+    assert 'case "recover_body":' in background
+    assert 'action: "recover_body",' in background
+    assert "body_text" in background
+    assert "body_html" in background
+
+
 def test_sent_folder_discovery_does_not_require_folder_id_field():
     # Regression test: Thunderbird/Betterbird folders don't expose a numeric `id` field.
     # The earlier implementation incorrectly gated on `folder.id != null` and discovered 0 sent folders.

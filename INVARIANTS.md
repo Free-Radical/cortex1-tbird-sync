@@ -22,6 +22,7 @@ KEEP THIS FILE CURRENT. These are hard rules for `cortex1-tbird-sync`.
 - Keep WebSocket endpoint contract: `/tbird-sync/ws`.
 - Keep `manifest.json` background script order: `sent_folder_discovery.js` before `background.js`.
 - Keep `cortex.*` helper RPC methods functional for header-message-id workflows.
+- Keep the tracked `cortex1-tbird-sync.xpi` rebuilt from current source. It must contain the current `manifest.json`, `sent_folder_discovery.js`, and `background.js`; if `manifest.json` advertises body-recovery-capable behavior, the packaged `background.js` must include the `recover_body` command implementation.
 - Keep `buildTbState()` schema stable (state flags, folder info, metadata, `stateReadAt`).
 - Preserve queue limits and persistence behavior (`EVENT_QUEUE_LIMIT`, debug/failure caps).
 - Validate new RPC methods against allowlist checks and unit tests.
