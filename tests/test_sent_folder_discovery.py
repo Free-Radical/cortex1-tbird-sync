@@ -41,6 +41,14 @@ def test_xpi_contains_current_source_files():
             assert packaged == source
 
 
+def test_xpi_manifest_includes_tag_definition_permissions():
+    with zipfile.ZipFile(REPO_ROOT / "cortex1-tbird-sync.xpi") as zf:
+        manifest = json.loads(zf.read("manifest.json"))
+
+    permissions = set(manifest.get("permissions") or [])
+    assert {"messagesTags", "messagesTagsList"} <= permissions
+
+
 def test_xpi_background_includes_recover_body_action():
     with zipfile.ZipFile(REPO_ROOT / "cortex1-tbird-sync.xpi") as zf:
         background = zf.read("background.js").decode("utf-8")
