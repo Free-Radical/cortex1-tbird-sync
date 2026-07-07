@@ -1547,8 +1547,8 @@ describe("RPC Method Execution", () => {
             expect(result.success).toBe(true);
         });
 
-        it("should support messages.tags.list as an alias for messages.listTags", async () => {
-            messenger.messages.tags.list.mockResolvedValue([{ key: "$label1", tag: "Important" }]);
+        it("should support messages.tags.list through legacy messages.listTags", async () => {
+            messenger.messages.listTags.mockResolvedValue([{ key: "$label1", tag: "Important" }]);
 
             const result = await bg.executeRpcCommand({
                 method: "messages.tags.list",
@@ -1558,7 +1558,104 @@ describe("RPC Method Execution", () => {
             expect(result.success).toBe(true);
             expect(result.method).toBe("messages.tags.list");
             expect(result.result).toEqual([{ key: "$label1", tag: "Important" }]);
+            expect(messenger.messages.listTags).toHaveBeenCalledTimes(1);
+            expect(messenger.messages.tags.list).not.toHaveBeenCalled();
+        });
+
+        it("should support messages.tags.list through modern messages.tags.list when legacy is unavailable", async () => {
+            messenger.messages.listTags = undefined;
+            messenger.messages.tags.list.mockResolvedValue([{ key: "$label2", tag: "Work" }]);
+
+            const result = await bg.executeRpcCommand({
+                method: "messages.tags.list",
+                args: []
+            });
+
+            expect(result.success).toBe(true);
+            expect(result.method).toBe("messages.tags.list");
+            expect(result.result).toEqual([{ key: "$label2", tag: "Work" }]);
             expect(messenger.messages.tags.list).toHaveBeenCalledTimes(1);
+        });
+
+        it("should fall back to modern messages.tags.list when legacy listTags fails", async () => {
+            messenger.messages.listTags.mockRejectedValue(new Error("legacy API failed"));
+            messenger.messages.tags.list.mockResolvedValue([{ key: "$label3", tag: "Personal" }]);
+
+            const result = await bg.executeRpcCommand({
+                method: "messages.tags.list",
+                args: []
+            });
+
+            expect(result.success).toBe(true);
+            expect(result.result).toEqual([{ key: "$label3", tag: "Personal" }]);
+            expect(messenger.messages.listTags).toHaveBeenCalledTimes(1);
+            expect(messenger.messages.tags.list).toHaveBeenCalledTimes(1);
+        });
+
+        it("should create C1 tag definitions through legacy messages.createTag", async () => {
+            messenger.messages.createTag.mockResolvedValue("c1_needs_you");
+
+            const result = await bg.executeRpcCommand({
+                method: "messages.createTag",
+                args: ["c1_needs_you", "C1-Needs You", "#B42318"]
+            });
+
+            expect(result.success).toBe(true);
+            expect(result.result).toBe("c1_needs_you");
+            expect(messenger.messages.createTag).toHaveBeenCalledWith(
+                "c1_needs_you",
+                "C1-Needs You",
+                "#B42318"
+            );
+        });
+
+        it("should create C1 tag definitions through modern messages.tags.create", async () => {
+            messenger.messages.tags.create.mockResolvedValue("c1_needs_you");
+
+            const result = await bg.executeRpcCommand({
+                method: "messages.tags.create",
+                args: ["c1_needs_you", "C1-Needs You", "#B42318"]
+            });
+
+            expect(result.success).toBe(true);
+            expect(result.result).toBe("c1_needs_you");
+            expect(messenger.messages.tags.create).toHaveBeenCalledWith(
+                "c1_needs_you",
+                "C1-Needs You",
+                "#B42318"
+            );
+        });
+
+        it("should update C1 tag definitions through legacy messages.updateTag", async () => {
+            messenger.messages.updateTag.mockResolvedValue(undefined);
+
+            const result = await bg.executeRpcCommand({
+                method: "messages.updateTag",
+                args: ["c1_work", { tag: "C1-Work", color: "#6D28D9" }]
+            });
+
+            expect(result.success).toBe(true);
+            expect(result.result).toBeNull();
+            expect(messenger.messages.updateTag).toHaveBeenCalledWith(
+                "c1_work",
+                { tag: "C1-Work", color: "#6D28D9" }
+            );
+        });
+
+        it("should update C1 tag definitions through modern messages.tags.update", async () => {
+            messenger.messages.tags.update.mockResolvedValue(undefined);
+
+            const result = await bg.executeRpcCommand({
+                method: "messages.tags.update",
+                args: ["c1_work", { tag: "C1-Work", color: "#6D28D9" }]
+            });
+
+            expect(result.success).toBe(true);
+            expect(result.result).toBeNull();
+            expect(messenger.messages.tags.update).toHaveBeenCalledWith(
+                "c1_work",
+                { tag: "C1-Work", color: "#6D28D9" }
+            );
         });
 
         it("should preserve rpc method on timeout results", async () => {

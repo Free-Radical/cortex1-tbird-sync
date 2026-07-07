@@ -2927,16 +2927,26 @@ async function executeRpcCommand(cmd) {
         if (method.startsWith("cortex.")) {
             result = await cortexRpc(method, args);
         } else if (method === "messages.tags.list") {
+            let legacyListError = null;
             if (messenger.messages && typeof messenger.messages.listTags === "function") {
-                result = await messenger.messages.listTags();
-            } else if (
-                messenger.messages &&
-                messenger.messages.tags &&
-                typeof messenger.messages.tags.list === "function"
-            ) {
-                result = await messenger.messages.tags.list();
-            } else {
-                throw new Error("Unknown method: messages.tags.list");
+                try {
+                    result = await messenger.messages.listTags();
+                } catch (error) {
+                    legacyListError = error;
+                }
+            }
+            if (!Array.isArray(result)) {
+                if (
+                    messenger.messages &&
+                    messenger.messages.tags &&
+                    typeof messenger.messages.tags.list === "function"
+                ) {
+                    result = await messenger.messages.tags.list();
+                } else if (legacyListError) {
+                    throw legacyListError;
+                } else {
+                    throw new Error("Unknown method: messages.tags.list");
+                }
             }
         } else if (method === "messages.query") {
             const original = (args[0] && typeof args[0] === "object") ? args[0] : {};
