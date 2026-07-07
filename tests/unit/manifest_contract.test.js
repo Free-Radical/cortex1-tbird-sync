@@ -42,6 +42,11 @@ describe("manifest contract", () => {
         expect(permissions).toEqual(expect.arrayContaining(["accountsRead", "accountsFolders", "messagesRead"]));
     });
 
+    test("permissions include tag metadata management for C1 tag definitions", () => {
+        const permissions = Array.isArray(manifest.permissions) ? manifest.permissions : [];
+        expect(permissions).toEqual(expect.arrayContaining(["messagesTags", "messagesTagsList"]));
+    });
+
     test("icon assets referenced by manifest exist", () => {
         const allIconPaths = new Set();
 

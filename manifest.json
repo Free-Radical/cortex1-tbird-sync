@@ -17,6 +17,8 @@
     "messagesMove",
     "messagesDelete",
     "messagesImport",
+    "messagesTags",
+    "messagesTagsList",
     "accountsRead",
     "accountsFolders",
     "compose",
