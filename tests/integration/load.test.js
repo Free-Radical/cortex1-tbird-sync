@@ -501,6 +501,7 @@ describe("Load Tests with Stub Server", () => {
         }, 10000);
 
         it("should handle 50 commands via WebSocket rapidly", async () => {
+            jest.useRealTimers(); // This test exercises real HTTP and WebSocket I/O.
             let ws;
             try {
                 ws = await connectWebSocket();
