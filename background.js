@@ -1401,9 +1401,20 @@ async function handleRecoverBody(cmd) {
     if (!messageId) {
         return { success: false, action: "recover_body", error: "messageId required" };
     }
-    const message = await findMessageByHeaderId(messageId);
+    const suppliedLocator = cmd.locator && typeof cmd.locator === "object" && !Array.isArray(cmd.locator)
+        ? cmd.locator
+        : {};
+    const lookup = await findMessageByLocator({
+        ...suppliedLocator,
+        message_id: messageId
+    });
+    const message = lookup.message;
     if (!message) {
-        return { success: false, action: "recover_body", messageId, error: `Message not found: ${messageId}` };
+        const reason = lookup.match && lookup.match.reason;
+        const error = reason === "ambiguous_locator"
+            ? "Message locator was ambiguous"
+            : "Message not found";
+        return { success: false, action: "recover_body", messageId, error };
     }
 
     const full = await messenger.messages.getFull(message.id);

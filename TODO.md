@@ -8,6 +8,7 @@
 - [ ] `forwarded` and `replied` status not available via Thunderbird WebExtension API — only readable from X-Mozilla-Status headers in mbox files (may be stale until folder compact)
 
 ## Done
+- [x] Route `recover_body` through bounded locator recovery after stale Message-ID lookup misses
 - [x] Rebuild and hardgate packaged XPI freshness, including `recover_body` support
 - [x] Locator fallback honors richer cortex1-core payloads: ordered fallback folders, opt-in All Mail/Trash discovery, and recipient/CC ambiguity tie-breaks
 - [x] Locator fallback honors core's bounded 7-day recovery window

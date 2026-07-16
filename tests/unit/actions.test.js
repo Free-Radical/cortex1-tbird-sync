@@ -904,6 +904,136 @@ describe("Action Handlers", () => {
             expect(frame.event.message_id).toBe("test-msg-id@example.com");
             expect(frame.event.body_text).toBe("Recovered plain body");
             expect(frame.event.body_html).toBe("<p>Recovered html body</p>");
+            expect(messenger.messages.query).toHaveBeenCalledTimes(1);
+            expect(messenger.accounts.list).not.toHaveBeenCalled();
+        });
+
+        it("should recover through the bounded locator after direct Message-ID lookup misses", async () => {
+            const mockWs = { readyState: 1, send: jest.fn() };
+            bg._setWs(mockWs);
+            const folder = createMockFolder({ accountId: "account1", path: "/INBOX" });
+            const recovered = createMockMessage({
+                id: 24680,
+                headerMessageId: "recovered-msg-id@example.com",
+                author: "Sender Name <sender@example.com>",
+                subject: "Recover this body",
+                date: new Date("2026-07-15T12:03:00.000Z"),
+                folder
+            });
+            messenger.accounts.list.mockResolvedValue([
+                createMockAccount({ id: "account1", folders: [folder] })
+            ]);
+            messenger.messages.query
+                .mockResolvedValueOnce({ messages: [] })
+                .mockResolvedValueOnce({ messages: [recovered], id: null });
+            messenger.messages.getFull.mockResolvedValue({
+                parts: [{ contentType: "text/plain", body: "Recovered by locator" }]
+            });
+
+            const result = await bg.processCommand({
+                action: "recover_body",
+                messageId: "stale-msg-id@example.com",
+                recordId: "rec-456",
+                locator: {
+                    account_id: "account1",
+                    folder_path: "/INBOX",
+                    from_addr: "sender@example.com",
+                    subject: "Recover this body",
+                    date: "2026-07-15T12:00:00.000Z",
+                    window_seconds: 300,
+                    max_scan: 20
+                }
+            });
+
+            expect(result.success).toBe(true);
+            expect(messenger.messages.getFull).toHaveBeenCalledWith(24680);
+            expect(messenger.messages.query).toHaveBeenNthCalledWith(1, {
+                headerMessageId: "stale-msg-id@example.com"
+            });
+            expect(messenger.messages.query).toHaveBeenNthCalledWith(2, {
+                folder,
+                fromDate: new Date("2026-07-15T11:55:00.000Z")
+            });
+            const frame = JSON.parse(mockWs.send.mock.calls[0][0]);
+            expect(frame.event.record_id).toBe("rec-456");
+            expect(frame.event.message_id).toBe("recovered-msg-id@example.com");
+            expect(frame.event.body_text).toBe("Recovered by locator");
+        });
+
+        it("should fail closed without fetching or emitting when the locator is ambiguous", async () => {
+            const mockWs = { readyState: 1, send: jest.fn() };
+            bg._setWs(mockWs);
+            const folder = createMockFolder({ accountId: "account1", path: "/INBOX" });
+            const candidates = [
+                createMockMessage({
+                    id: 24681,
+                    headerMessageId: "ambiguous-one@example.com",
+                    author: "sender@example.com",
+                    subject: "Ambiguous recovery",
+                    date: new Date("2026-07-15T12:01:00.000Z"),
+                    folder
+                }),
+                createMockMessage({
+                    id: 24682,
+                    headerMessageId: "ambiguous-two@example.com",
+                    author: "sender@example.com",
+                    subject: "Ambiguous recovery",
+                    date: new Date("2026-07-15T12:02:00.000Z"),
+                    folder
+                })
+            ];
+            messenger.accounts.list.mockResolvedValue([
+                createMockAccount({ id: "account1", folders: [folder] })
+            ]);
+            messenger.messages.query
+                .mockResolvedValueOnce({ messages: [] })
+                .mockResolvedValueOnce({ messages: candidates, id: null });
+
+            const result = await bg.processCommand({
+                action: "recover_body",
+                messageId: "stale-msg-id@example.com",
+                locator: {
+                    account_id: "account1",
+                    folder_path: "/INBOX",
+                    from_addr: "sender@example.com",
+                    subject: "Ambiguous recovery",
+                    date: "2026-07-15T12:00:00.000Z",
+                    window_seconds: 300,
+                    max_scan: 20
+                }
+            });
+
+            expect(result).toMatchObject({
+                success: false,
+                action: "recover_body",
+                error: "Message locator was ambiguous"
+            });
+            expect(messenger.messages.getFull).not.toHaveBeenCalled();
+            expect(mockWs.send).not.toHaveBeenCalled();
+        });
+
+        it("should not scan folders when locator metadata is incomplete", async () => {
+            const mockWs = { readyState: 1, send: jest.fn() };
+            bg._setWs(mockWs);
+            messenger.messages.query.mockResolvedValue({ messages: [] });
+
+            const result = await bg.processCommand({
+                action: "recover_body",
+                messageId: "stale-msg-id@example.com",
+                locator: {
+                    subject: "Incomplete locator",
+                    date: "2026-07-15T12:00:00.000Z"
+                }
+            });
+
+            expect(result).toMatchObject({
+                success: false,
+                action: "recover_body",
+                error: "Message not found"
+            });
+            expect(messenger.accounts.list).not.toHaveBeenCalled();
+            expect(messenger.messages.getFull).not.toHaveBeenCalled();
+            expect(mockWs.send).not.toHaveBeenCalled();
         });
 
         it("should fail without sending when Thunderbird returns no body", async () => {

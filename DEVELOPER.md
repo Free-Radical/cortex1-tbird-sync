@@ -77,6 +77,7 @@ Bidirectional WebSocket for real-time communication.
 | `set_flagged` | Set flagged status (requires `flagged: true/false`) |
 | `open_message` | Open message in new Thunderbird window |
 | `get_status` | Get live read/flagged status from Thunderbird |
+| `recover_body` | Read and return the full body by Message-ID; an optional metadata-only `locator` enables the same bounded, ambiguity-rejecting fallback as `cortex.messages.findByLocator` after direct lookup misses |
 | `create_draft` | Create reply draft (requires `body`, optional `replyAll`) |
 | `send_reply` | Send reply immediately (requires `body`, optional `replyAll`) |
 

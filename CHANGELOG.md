@@ -1,6 +1,9 @@
 # Changelog
 
 ## Unreleased
+- `recover_body` now uses the existing Message-ID-first bounded locator resolver
+  when Cortex supplies an optional metadata-only locator, and fails closed on
+  incomplete or ambiguous fallback matches.
 - Added `cortex.messages.getStateAuditByHeaderId` property audit coverage for raw
   JSON-safe Thunderbird snapshots, optional API availability, missing live
   fields, and the explicit not-bidirectionally-synced attribute list.
