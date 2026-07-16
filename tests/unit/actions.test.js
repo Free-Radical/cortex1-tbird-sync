@@ -894,7 +894,10 @@ describe("Action Handlers", () => {
 
             expect(result.success).toBe(true);
             expect(result.action).toBe("recover_body");
+            expect(result.recovery_status).toBe("recovered");
+            expect(result.terminal_source_missing).toBe(false);
             expect(result.body_sent).toBe(true);
+            expect(result).not.toHaveProperty("messageId");
             expect(messenger.messages.getFull).toHaveBeenCalledWith(mockMsg.id);
             expect(mockWs.send).toHaveBeenCalledTimes(1);
             const frame = JSON.parse(mockWs.send.mock.calls[0][0]);
@@ -946,6 +949,8 @@ describe("Action Handlers", () => {
             });
 
             expect(result.success).toBe(true);
+            expect(result.recovery_status).toBe("recovered");
+            expect(result.terminal_source_missing).toBe(false);
             expect(messenger.messages.getFull).toHaveBeenCalledWith(24680);
             expect(messenger.messages.query).toHaveBeenNthCalledWith(1, {
                 headerMessageId: "stale-msg-id@example.com"
@@ -1006,8 +1011,11 @@ describe("Action Handlers", () => {
             expect(result).toMatchObject({
                 success: false,
                 action: "recover_body",
-                error: "Message locator was ambiguous"
+                recovery_status: "ambiguous_locator",
+                terminal_source_missing: false,
+                error: "C1 found multiple possible source messages and kept the record unchanged."
             });
+            expect(result).not.toHaveProperty("messageId");
             expect(messenger.messages.getFull).not.toHaveBeenCalled();
             expect(mockWs.send).not.toHaveBeenCalled();
         });
@@ -1029,8 +1037,11 @@ describe("Action Handlers", () => {
             expect(result).toMatchObject({
                 success: false,
                 action: "recover_body",
-                error: "Message not found"
+                recovery_status: "insufficient_locator_specificity",
+                terminal_source_missing: false,
+                error: "C1 kept the record unchanged because the saved locator was not specific enough for safe recovery."
             });
+            expect(result).not.toHaveProperty("messageId");
             expect(messenger.accounts.list).not.toHaveBeenCalled();
             expect(messenger.messages.getFull).not.toHaveBeenCalled();
             expect(mockWs.send).not.toHaveBeenCalled();
@@ -1047,8 +1058,96 @@ describe("Action Handlers", () => {
             });
 
             expect(result.success).toBe(false);
-            expect(result.error).toContain("No body content");
+            expect(result).toMatchObject({
+                recovery_status: "body_content_pending",
+                terminal_source_missing: false,
+                error: "C1 found the source message, but trusted body content is not available yet."
+            });
+            expect(result).not.toHaveProperty("messageId");
             expect(mockWs.send).not.toHaveBeenCalled();
+        });
+
+        it("should bound folder-scope lookup failures without returning source identifiers", async () => {
+            const mockWs = { readyState: 1, send: jest.fn() };
+            bg._setWs(mockWs);
+            messenger.messages.query.mockResolvedValue({ messages: [] });
+            messenger.accounts.list.mockRejectedValue(
+                new Error("private-account/Inbox lookup broke for secret-message@example.com")
+            );
+
+            const result = await bg.processCommand({
+                action: "recover_body",
+                messageId: "secret-message@example.com",
+                recordId: "rec-private",
+                locator: {
+                    account_id: "private-account",
+                    folder_path: "/Inbox",
+                    from_addr: "sender@example.com",
+                    subject: "Private lookup",
+                    date: "2026-07-15T12:00:00.000Z"
+                }
+            });
+
+            expect(result).toEqual({
+                success: false,
+                action: "recover_body",
+                recovery_status: "folder_scope_unavailable",
+                terminal_source_missing: false,
+                error: "C1 could not reach the saved folder scope and kept the record unchanged.",
+                recordId: "rec-private"
+            });
+            expect(JSON.stringify(result)).not.toContain("secret-message@example.com");
+            expect(JSON.stringify(result)).not.toContain("private-account/Inbox");
+            expect(messenger.messages.getFull).not.toHaveBeenCalled();
+            expect(mockWs.send).not.toHaveBeenCalled();
+        });
+
+        it("should bound body retrieval exceptions as nonterminal recovery", async () => {
+            const mockWs = { readyState: 1, send: jest.fn() };
+            bg._setWs(mockWs);
+            messenger.messages.getFull.mockRejectedValue(
+                new Error("raw body retrieval detail for secret-message@example.com")
+            );
+
+            const result = await bg.processCommand({
+                action: "recover_body",
+                messageId: "secret-message@example.com",
+                recordId: "rec-private"
+            });
+
+            expect(result).toEqual({
+                success: false,
+                action: "recover_body",
+                recovery_status: "body_fetch_error",
+                terminal_source_missing: false,
+                error: "C1 found the source message, but trusted body retrieval did not complete.",
+                recordId: "rec-private"
+            });
+            expect(JSON.stringify(result)).not.toContain("secret-message@example.com");
+            expect(mockWs.send).not.toHaveBeenCalled();
+        });
+
+        it("should keep recovered body delivery nonterminal when the websocket is unavailable", async () => {
+            bg._setWs(null);
+            messenger.messages.getFull.mockResolvedValue({
+                parts: [{ contentType: "text/plain", body: "Recovered but not delivered" }]
+            });
+
+            const result = await bg.processCommand({
+                action: "recover_body",
+                messageId: "secret-message@example.com",
+                recordId: "rec-private"
+            });
+
+            expect(result).toEqual({
+                success: false,
+                action: "recover_body",
+                recovery_status: "transport_pending",
+                terminal_source_missing: false,
+                error: "C1 recovered trusted body content and is waiting for the server connection.",
+                recordId: "rec-private"
+            });
+            expect(JSON.stringify(result)).not.toContain("secret-message@example.com");
         });
     });
 

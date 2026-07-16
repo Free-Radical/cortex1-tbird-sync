@@ -81,6 +81,14 @@ Bidirectional WebSocket for real-time communication.
 | `create_draft` | Create reply draft (requires `body`, optional `replyAll`) |
 | `send_reply` | Send reply immediately (requires `body`, optional `replyAll`) |
 
+`recover_body` completions include an allowlisted `recovery_status` and
+`terminal_source_missing: false`. Misses, ambiguity, incomplete locators,
+folder-scope issues, empty bodies, retrieval errors, and temporary delivery
+issues keep the record unchanged and return calm C1-owned copy. Failure
+completions omit the source Message-ID and raw Thunderbird exception details;
+only the trusted `email_body_recovered` event carries the recovered source
+identity and body back to Cortex.
+
 ### Batch Actions
 
 | Action | Description |

@@ -1396,37 +1396,86 @@ function extractBodyFromFull(full) {
     return { body_text: bodyText, body_html: bodyHtml };
 }
 
+const RECOVER_BODY_FAILURE_COPY = Object.freeze({
+    missing_locator: "C1 kept the record unchanged because no saved source locator was available.",
+    ambiguous_locator: "C1 found multiple possible source messages and kept the record unchanged.",
+    insufficient_locator_specificity: "C1 kept the record unchanged because the saved locator was not specific enough for safe recovery.",
+    folder_scope_unavailable: "C1 could not reach the saved folder scope and kept the record unchanged.",
+    not_found: "C1 completed the bounded source lookup without a unique match.",
+    lookup_error: "C1 kept the record unchanged because the bounded source lookup did not complete.",
+    body_content_pending: "C1 found the source message, but trusted body content is not available yet.",
+    body_fetch_error: "C1 found the source message, but trusted body retrieval did not complete.",
+    transport_pending: "C1 recovered trusted body content and is waiting for the server connection."
+});
+
+function recoverBodyFailure(status, recordId = "") {
+    const normalizedStatus = Object.prototype.hasOwnProperty.call(RECOVER_BODY_FAILURE_COPY, status)
+        ? status
+        : "lookup_error";
+    const result = {
+        success: false,
+        action: "recover_body",
+        recovery_status: normalizedStatus,
+        terminal_source_missing: false,
+        error: RECOVER_BODY_FAILURE_COPY[normalizedStatus]
+    };
+    if (recordId) result.recordId = String(recordId);
+    return result;
+}
+
+function recoverBodyLookupFailureStatus(lookup) {
+    const reason = lookup && lookup.match && lookup.match.reason;
+    if (reason === "ambiguous_locator") return "ambiguous_locator";
+    if (reason === "insufficient_locator_specificity") return "insufficient_locator_specificity";
+    if (reason === "folder_not_found") return "folder_scope_unavailable";
+    if (reason === "locator_required") return "missing_locator";
+    return "not_found";
+}
+
 async function handleRecoverBody(cmd) {
     const messageId = cmd.messageId || cmd.message_id;
+    const recordId = cmd.recordId || cmd.record_id || "";
     if (!messageId) {
-        return { success: false, action: "recover_body", error: "messageId required" };
+        return recoverBodyFailure("missing_locator", recordId);
     }
     const suppliedLocator = cmd.locator && typeof cmd.locator === "object" && !Array.isArray(cmd.locator)
         ? cmd.locator
         : {};
-    const lookup = await findMessageByLocator({
-        ...suppliedLocator,
-        message_id: messageId
-    });
+    let lookup;
+    try {
+        lookup = await findMessageByLocator({
+            ...suppliedLocator,
+            message_id: messageId
+        });
+    } catch (error) {
+        DebugLogger.log("cmd", "recover_body lookup did not complete", {
+            error_type: error && error.name ? String(error.name) : "Error"
+        });
+        return recoverBodyFailure("lookup_error", recordId);
+    }
     const message = lookup.message;
     if (!message) {
-        const reason = lookup.match && lookup.match.reason;
-        const error = reason === "ambiguous_locator"
-            ? "Message locator was ambiguous"
-            : "Message not found";
-        return { success: false, action: "recover_body", messageId, error };
+        return recoverBodyFailure(recoverBodyLookupFailureStatus(lookup), recordId);
     }
 
-    const full = await messenger.messages.getFull(message.id);
+    let full;
+    try {
+        full = await messenger.messages.getFull(message.id);
+    } catch (error) {
+        DebugLogger.log("cmd", "recover_body body retrieval did not complete", {
+            error_type: error && error.name ? String(error.name) : "Error"
+        });
+        return recoverBodyFailure("body_fetch_error", recordId);
+    }
     const body = extractBodyFromFull(full);
     if (!body.body_text && !body.body_html) {
-        return { success: false, action: "recover_body", messageId, error: "No body content returned by Thunderbird" };
+        return recoverBodyFailure("body_content_pending", recordId);
     }
 
     const folder = message.folder || {};
     const event = {
         type: "email_body_recovered",
-        record_id: cmd.recordId || cmd.record_id || "",
+        record_id: recordId,
         message_id: message.headerMessageId || messageId,
         messageId: message.headerMessageId || messageId,
         body_text: body.body_text,
@@ -1441,14 +1490,22 @@ async function handleRecoverBody(cmd) {
         junk: Boolean(message.junk),
         tags: Array.isArray(message.tags) ? message.tags : []
     };
-    const sent = sendWebSocketMessage({ type: "event", event, data: event });
+    let sent = false;
+    try {
+        sent = sendWebSocketMessage({ type: "event", event, data: event });
+    } catch (error) {
+        DebugLogger.log("cmd", "recover_body event delivery did not complete", {
+            error_type: error && error.name ? String(error.name) : "Error"
+        });
+    }
+    if (!sent) return recoverBodyFailure("transport_pending", recordId);
     return {
-        success: sent,
+        success: true,
         action: "recover_body",
-        messageId,
+        recovery_status: "recovered",
+        terminal_source_missing: false,
         recordId: event.record_id || null,
-        body_sent: sent,
-        error: sent ? undefined : "WebSocket is not connected"
+        body_sent: true
     };
 }
 
