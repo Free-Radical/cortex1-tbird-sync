@@ -1,6 +1,12 @@
 # Changelog
 
 ## Unreleased
+- `recover_body` completion failures now use structured, explicitly nonterminal
+  recovery statuses and calm C1-owned copy without returning source Message-IDs
+  or raw Thunderbird exception details.
+- `recover_body` now uses the existing Message-ID-first bounded locator resolver
+  when Cortex supplies an optional metadata-only locator, and fails closed on
+  incomplete or ambiguous fallback matches.
 - Added `cortex.messages.getStateAuditByHeaderId` property audit coverage for raw
   JSON-safe Thunderbird snapshots, optional API availability, missing live
   fields, and the explicit not-bidirectionally-synced attribute list.

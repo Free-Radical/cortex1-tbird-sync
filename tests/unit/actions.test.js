@@ -894,7 +894,10 @@ describe("Action Handlers", () => {
 
             expect(result.success).toBe(true);
             expect(result.action).toBe("recover_body");
+            expect(result.recovery_status).toBe("recovered");
+            expect(result.terminal_source_missing).toBe(false);
             expect(result.body_sent).toBe(true);
+            expect(result).not.toHaveProperty("messageId");
             expect(messenger.messages.getFull).toHaveBeenCalledWith(mockMsg.id);
             expect(mockWs.send).toHaveBeenCalledTimes(1);
             const frame = JSON.parse(mockWs.send.mock.calls[0][0]);
@@ -904,6 +907,144 @@ describe("Action Handlers", () => {
             expect(frame.event.message_id).toBe("test-msg-id@example.com");
             expect(frame.event.body_text).toBe("Recovered plain body");
             expect(frame.event.body_html).toBe("<p>Recovered html body</p>");
+            expect(messenger.messages.query).toHaveBeenCalledTimes(1);
+            expect(messenger.accounts.list).not.toHaveBeenCalled();
+        });
+
+        it("should recover through the bounded locator after direct Message-ID lookup misses", async () => {
+            const mockWs = { readyState: 1, send: jest.fn() };
+            bg._setWs(mockWs);
+            const folder = createMockFolder({ accountId: "account1", path: "/INBOX" });
+            const recovered = createMockMessage({
+                id: 24680,
+                headerMessageId: "recovered-msg-id@example.com",
+                author: "Sender Name <sender@example.com>",
+                subject: "Recover this body",
+                date: new Date("2026-07-15T12:03:00.000Z"),
+                folder
+            });
+            messenger.accounts.list.mockResolvedValue([
+                createMockAccount({ id: "account1", folders: [folder] })
+            ]);
+            messenger.messages.query
+                .mockResolvedValueOnce({ messages: [] })
+                .mockResolvedValueOnce({ messages: [recovered], id: null });
+            messenger.messages.getFull.mockResolvedValue({
+                parts: [{ contentType: "text/plain", body: "Recovered by locator" }]
+            });
+
+            const result = await bg.processCommand({
+                action: "recover_body",
+                messageId: "stale-msg-id@example.com",
+                recordId: "rec-456",
+                locator: {
+                    account_id: "account1",
+                    folder_path: "/INBOX",
+                    from_addr: "sender@example.com",
+                    subject: "Recover this body",
+                    date: "2026-07-15T12:00:00.000Z",
+                    window_seconds: 300,
+                    max_scan: 20
+                }
+            });
+
+            expect(result.success).toBe(true);
+            expect(result.recovery_status).toBe("recovered");
+            expect(result.terminal_source_missing).toBe(false);
+            expect(messenger.messages.getFull).toHaveBeenCalledWith(24680);
+            expect(messenger.messages.query).toHaveBeenNthCalledWith(1, {
+                headerMessageId: "stale-msg-id@example.com"
+            });
+            expect(messenger.messages.query).toHaveBeenNthCalledWith(2, {
+                folder,
+                fromDate: new Date("2026-07-15T11:55:00.000Z")
+            });
+            const frame = JSON.parse(mockWs.send.mock.calls[0][0]);
+            expect(frame.event.record_id).toBe("rec-456");
+            expect(frame.event.message_id).toBe("recovered-msg-id@example.com");
+            expect(frame.event.body_text).toBe("Recovered by locator");
+        });
+
+        it("should fail closed without fetching or emitting when the locator is ambiguous", async () => {
+            const mockWs = { readyState: 1, send: jest.fn() };
+            bg._setWs(mockWs);
+            const folder = createMockFolder({ accountId: "account1", path: "/INBOX" });
+            const candidates = [
+                createMockMessage({
+                    id: 24681,
+                    headerMessageId: "ambiguous-one@example.com",
+                    author: "sender@example.com",
+                    subject: "Ambiguous recovery",
+                    date: new Date("2026-07-15T12:01:00.000Z"),
+                    folder
+                }),
+                createMockMessage({
+                    id: 24682,
+                    headerMessageId: "ambiguous-two@example.com",
+                    author: "sender@example.com",
+                    subject: "Ambiguous recovery",
+                    date: new Date("2026-07-15T12:02:00.000Z"),
+                    folder
+                })
+            ];
+            messenger.accounts.list.mockResolvedValue([
+                createMockAccount({ id: "account1", folders: [folder] })
+            ]);
+            messenger.messages.query
+                .mockResolvedValueOnce({ messages: [] })
+                .mockResolvedValueOnce({ messages: candidates, id: null });
+
+            const result = await bg.processCommand({
+                action: "recover_body",
+                messageId: "stale-msg-id@example.com",
+                locator: {
+                    account_id: "account1",
+                    folder_path: "/INBOX",
+                    from_addr: "sender@example.com",
+                    subject: "Ambiguous recovery",
+                    date: "2026-07-15T12:00:00.000Z",
+                    window_seconds: 300,
+                    max_scan: 20
+                }
+            });
+
+            expect(result).toMatchObject({
+                success: false,
+                action: "recover_body",
+                recovery_status: "ambiguous_locator",
+                terminal_source_missing: false,
+                error: "C1 found multiple possible source messages and kept the record unchanged."
+            });
+            expect(result).not.toHaveProperty("messageId");
+            expect(messenger.messages.getFull).not.toHaveBeenCalled();
+            expect(mockWs.send).not.toHaveBeenCalled();
+        });
+
+        it("should not scan folders when locator metadata is incomplete", async () => {
+            const mockWs = { readyState: 1, send: jest.fn() };
+            bg._setWs(mockWs);
+            messenger.messages.query.mockResolvedValue({ messages: [] });
+
+            const result = await bg.processCommand({
+                action: "recover_body",
+                messageId: "stale-msg-id@example.com",
+                locator: {
+                    subject: "Incomplete locator",
+                    date: "2026-07-15T12:00:00.000Z"
+                }
+            });
+
+            expect(result).toMatchObject({
+                success: false,
+                action: "recover_body",
+                recovery_status: "insufficient_locator_specificity",
+                terminal_source_missing: false,
+                error: "C1 kept the record unchanged because the saved locator was not specific enough for safe recovery."
+            });
+            expect(result).not.toHaveProperty("messageId");
+            expect(messenger.accounts.list).not.toHaveBeenCalled();
+            expect(messenger.messages.getFull).not.toHaveBeenCalled();
+            expect(mockWs.send).not.toHaveBeenCalled();
         });
 
         it("should fail without sending when Thunderbird returns no body", async () => {
@@ -917,8 +1058,96 @@ describe("Action Handlers", () => {
             });
 
             expect(result.success).toBe(false);
-            expect(result.error).toContain("No body content");
+            expect(result).toMatchObject({
+                recovery_status: "body_content_pending",
+                terminal_source_missing: false,
+                error: "C1 found the source message, but trusted body content is not available yet."
+            });
+            expect(result).not.toHaveProperty("messageId");
             expect(mockWs.send).not.toHaveBeenCalled();
+        });
+
+        it("should bound folder-scope lookup failures without returning source identifiers", async () => {
+            const mockWs = { readyState: 1, send: jest.fn() };
+            bg._setWs(mockWs);
+            messenger.messages.query.mockResolvedValue({ messages: [] });
+            messenger.accounts.list.mockRejectedValue(
+                new Error("private-account/Inbox lookup broke for secret-message@example.com")
+            );
+
+            const result = await bg.processCommand({
+                action: "recover_body",
+                messageId: "secret-message@example.com",
+                recordId: "rec-private",
+                locator: {
+                    account_id: "private-account",
+                    folder_path: "/Inbox",
+                    from_addr: "sender@example.com",
+                    subject: "Private lookup",
+                    date: "2026-07-15T12:00:00.000Z"
+                }
+            });
+
+            expect(result).toEqual({
+                success: false,
+                action: "recover_body",
+                recovery_status: "folder_scope_unavailable",
+                terminal_source_missing: false,
+                error: "C1 could not reach the saved folder scope and kept the record unchanged.",
+                recordId: "rec-private"
+            });
+            expect(JSON.stringify(result)).not.toContain("secret-message@example.com");
+            expect(JSON.stringify(result)).not.toContain("private-account/Inbox");
+            expect(messenger.messages.getFull).not.toHaveBeenCalled();
+            expect(mockWs.send).not.toHaveBeenCalled();
+        });
+
+        it("should bound body retrieval exceptions as nonterminal recovery", async () => {
+            const mockWs = { readyState: 1, send: jest.fn() };
+            bg._setWs(mockWs);
+            messenger.messages.getFull.mockRejectedValue(
+                new Error("raw body retrieval detail for secret-message@example.com")
+            );
+
+            const result = await bg.processCommand({
+                action: "recover_body",
+                messageId: "secret-message@example.com",
+                recordId: "rec-private"
+            });
+
+            expect(result).toEqual({
+                success: false,
+                action: "recover_body",
+                recovery_status: "body_fetch_error",
+                terminal_source_missing: false,
+                error: "C1 found the source message, but trusted body retrieval did not complete.",
+                recordId: "rec-private"
+            });
+            expect(JSON.stringify(result)).not.toContain("secret-message@example.com");
+            expect(mockWs.send).not.toHaveBeenCalled();
+        });
+
+        it("should keep recovered body delivery nonterminal when the websocket is unavailable", async () => {
+            bg._setWs(null);
+            messenger.messages.getFull.mockResolvedValue({
+                parts: [{ contentType: "text/plain", body: "Recovered but not delivered" }]
+            });
+
+            const result = await bg.processCommand({
+                action: "recover_body",
+                messageId: "secret-message@example.com",
+                recordId: "rec-private"
+            });
+
+            expect(result).toEqual({
+                success: false,
+                action: "recover_body",
+                recovery_status: "transport_pending",
+                terminal_source_missing: false,
+                error: "C1 recovered trusted body content and is waiting for the server connection.",
+                recordId: "rec-private"
+            });
+            expect(JSON.stringify(result)).not.toContain("secret-message@example.com");
         });
     });
 
