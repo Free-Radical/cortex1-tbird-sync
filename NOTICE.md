@@ -1,29 +1,33 @@
-Required Notice: Copyright 2025 Saqib Ali Khan.
-Required Notice: cortex1-tbird-sync is licensed under the PolyForm Noncommercial License 1.0.0.
-
 # Notice
 
 Repository: cortex1-tbird-sync
-Copyright © 2025 Saqib Ali Khan
+Copyright © 2025–2026 Saqib Ali Khan
 
-License: PolyForm Noncommercial License 1.0.0
+Current license: Business Source License 1.1
+SPDX identifier: BUSL-1.1
+Change Date: 2030-01-01
+Change License: Apache License, Version 2.0
 Commercial licensing contact: Saqib.Khan@Me.com
 
-Personal, hobby, educational, research, evaluation, and other noncommercial
-use are allowed under the repository license.
+The current source is available for non-production use under the terms and
+definitions in [LICENSE](LICENSE). Production, commercial, hosted,
+managed-service, customer-facing, embedded, revenue-generating, or other use
+outside those terms requires a separate written commercial license from Saqib
+Ali Khan.
 
-Commercial, hosted, managed-service, customer-facing, internal business,
-revenue-generating, paid, or other monetized use requires a separate written
-commercial license from Saqib Ali Khan.
+## License history
 
-Transition note:
 - Versions published before 2026-03-12 were released under Business Source
   License 1.1.
-- Commits published from 2026-03-12 forward are released under the current
-  repository license shown above.
-- Earlier BUSL grants remain in effect for the older versions that were
-  already published.
+- Versions published from 2026-03-12 through the parent of the commit that
+  restored Business Source License 1.1 were released under PolyForm
+  Noncommercial License 1.0.0.
+- The restoring commit and later versions are released under the current
+  Business Source License 1.1 shown in `LICENSE`.
+- License grants for earlier versions remain governed by the license that
+  accompanied each version when it was published.
 
-Trademark note:
-- Trademarks, service marks, product names, and logos are not licensed except
-  as expressly stated in a separate written agreement.
+## Trademarks
+
+Trademarks, service marks, product names, and logos are not licensed except as
+expressly stated in a separate written agreement.
