@@ -1,6 +1,6 @@
 # cortex1-tbird-sync
 
-> Source-available under [PolyForm Noncommercial 1.0.0](LICENSE). [Commercial licensing](COMMERCIAL-LICENSE.md) available.
+> Source-available under the [Business Source License 1.1](LICENSE) (`BUSL-1.1`). Non-production use is permitted under the license; production, commercial, hosted, managed-service, or embedded use requires a [separate commercial license](COMMERCIAL-LICENSE.md). Change Date: 2030-01-01. Change License: Apache License 2.0.
 
 Thunderbird extension that keeps your email state (read, flagged, archived) in sync with [cortex_server](https://github.com/Free-Radical/cortex1-core) in real time.
 
@@ -62,4 +62,12 @@ For the full WebSocket protocol, supported actions, RPC contracts, and server en
 
 ## License
 
-PolyForm Noncommercial License 1.0.0. Personal, hobby, educational, research, and evaluation use allowed. Commercial use requires a [separate license](COMMERCIAL-LICENSE.md). Contact: Saqib.Khan@Me.com
+Business Source License 1.1 (SPDX identifier: `BUSL-1.1`).
+
+- Non-production use is allowed as defined in [LICENSE](LICENSE).
+- Production, commercial, hosted, managed-service, and embedded use requires a [separate written commercial license](COMMERCIAL-LICENSE.md).
+- Change Date: 2030-01-01.
+- Change License: Apache License 2.0.
+- Licensing contact: Saqib.Khan@Me.com.
+
+Earlier versions remain governed by the license that accompanied each published version; see [NOTICE.md](NOTICE.md) for the license history.
