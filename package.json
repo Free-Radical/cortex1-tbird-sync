@@ -2,6 +2,7 @@
   "name": "cortex1-tbird-sync",
   "version": "1.6.7",
   "description": "Cortex1 Thunderbird Sync Extension",
+  "license": "BUSL-1.1",
   "scripts": {
     "test": "jest --coverage",
     "test:watch": "jest --watch",

@@ -1,34 +1,39 @@
 # Commercial Licensing
 
-This repository is source-available for personal and other noncommercial use.
+`cortex1-tbird-sync` is source-available under the Business Source License 1.1
+(SPDX identifier: `BUSL-1.1`). The governing terms are in [LICENSE](LICENSE).
+This explanatory file does not replace or modify those terms.
 
-The governing license is [LICENSE](LICENSE). This file explains the licensor's
-commercial-use policy and examples of uses that require a separate written
-commercial license from Saqib Ali Khan.
+## Use Allowed Without A Commercial License
 
-## Noncommercial Use That Is Allowed
+Non-production use is allowed only as defined in `LICENSE`. Examples include:
 
-Examples include:
-- personal study, hobby work, and home-lab use
-- educational and academic use
-- noncommercial research and evaluation
-- experimentation without any anticipated commercial application
+- personal, hobby, educational, research, or academic use
+- development, testing, demonstration, and evaluation in non-production
+  environments
+- internal evaluation using synthetic or properly de-identified test data to
+  determine whether to obtain a commercial license
 
-## Uses That Require A Commercial License
+## Use Requiring A Commercial License
 
-A separate written commercial license is required for uses primarily intended
-for or directed toward commercial advantage or monetary compensation,
-including for example:
-- selling software, services, or access built from or around this repository
-- hosted, managed-service, SaaS, API, relay, gateway, or multi-tenant use
-- internal business use by a company, consultancy, startup, or nonprofit in
-  support of operations, revenue, clients, or fundraising
-- contractor or employee use on behalf of an organization
-- bundling this repository into a paid or revenue-generating product
+A separate written commercial license is required for use outside the
+non-production grant, including:
+
+- production use with real end-user, customer, patient, client, or operational
+  data
+- internal business use supporting day-to-day operations or business-critical
+  workloads
+- hosted, managed-service, SaaS, API, relay, gateway, or other customer-facing
+  use
+- free tiers, betas, or pilots made available to third parties
+- embedding, bundling, or distributing the software in a commercial product or
+  paid offering
 - client work, paid implementation, paid support, or paid integration
-- training, tuning, or evaluation performed as part of building or operating a
-  commercial offering
+- contractor or employee use on behalf of an organization for commercial or
+  operational advantage, except qualifying evaluation use
 
-If you are unsure whether your use is commercial, ask first.
+The Change Date is 2030-01-01. On the applicable change date under `LICENSE`,
+the relevant version changes to Apache License 2.0.
 
-Contact: Saqib.Khan@Me.com
+For production, commercial, hosted, managed-service, embedded, or other use not
+permitted by `LICENSE`, contact: Saqib.Khan@Me.com
