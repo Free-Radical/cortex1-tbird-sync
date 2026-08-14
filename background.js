@@ -4000,7 +4000,16 @@ function enqueueCommands(commands) {
             continue;
         }
 
-        if (knownCommandIds.has(id)) continue;
+        if (knownCommandIds.has(id)) {
+            // Duplicate id: dropped on purpose, but the sender never learns —
+            // no result is emitted for it. Log so a caller reusing ids (instead
+            // of allocating a fresh one per retry) is diagnosable.
+            DebugLogger.log("poll", "Skipping duplicate command id", {
+                id,
+                action: cmd && cmd.action ? cmd.action : null
+            });
+            continue;
+        }
         knownCommandIds.add(id);
 
         const lane = getCommandLane(cmd);

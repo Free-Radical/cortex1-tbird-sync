@@ -375,6 +375,24 @@ describe("cancel_job queue hygiene", () => {
         expect(bg.slowCommandQueue.length).toBe(1);
     });
 
+    it("logs duplicate command ids so silent drops are diagnosable", () => {
+        bg.DebugLogger.logs = [];
+
+        bg.enqueueCommands([{ id: "dupe-1", action: "mark_read" }]);
+        // No result is ever emitted for a dropped duplicate, so the debug log is
+        // the only signal a caller reusing ids leaves behind.
+        const dropped = bg.enqueueCommands([{ id: "dupe-1", action: "mark_read" }]);
+
+        expect(dropped).toBe(0);
+
+        const entry = bg.DebugLogger.getLogs().find(
+            (l) => l.msg === "Skipping duplicate command id"
+        );
+        expect(entry).toBeDefined();
+        expect(entry.cat).toBe("poll");
+        expect(entry.data).toEqual({ id: "dupe-1", action: "mark_read" });
+    });
+
     it("removes commands matching cmd.job_id field", () => {
         // Commands with job_id field (not cmd.id) should also be removed
         bg.fastCommandQueue.push({ id: "unrelated-id", job_id: "target", action: "sync_state" });

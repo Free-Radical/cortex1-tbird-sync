@@ -260,31 +260,61 @@ wss.on('connection', (ws) => {
     }
 });
 
+function recordResult(result) {
+    if (!result || typeof result !== 'object') return;
+    completedResults.push(result);
+    stats.commandsCompleted++;
+    // Remove from pending
+    const idx = pendingCommands.findIndex(c => c.id === result.id);
+    if (idx >= 0) {
+        pendingCommands.splice(idx, 1);
+    }
+    // Note: Don't send next command here - commands are pushed when added
+}
+
 function handleWebSocketMessage(ws, msg) {
     const { type, data } = msg;
 
     switch (type) {
-        case 'result':
-            // Store result
-            completedResults.push(data);
-            stats.commandsCompleted++;
-            // Remove from pending
-            const idx = pendingCommands.findIndex(c => c.id === data.id);
-            if (idx >= 0) {
-                pendingCommands.splice(idx, 1);
+        // The extension sends batched completions as {type:"results", results:[...]},
+        // up to 25 per frame (flushCompletions in background.js). The singular
+        // "result" form is accepted only for older senders.
+        case 'results': {
+            const results = Array.isArray(msg.results)
+                ? msg.results
+                : (Array.isArray(data) ? data : []);
+            for (const result of results) {
+                recordResult(result);
             }
-            // Note: Don't send next command here - commands are pushed when added
+            break;
+        }
+
+        case 'result':
+            recordResult(data);
             break;
 
-        case 'event':
-            // Store event
-            if (data.events) {
-                receivedEvents.push(...data.events);
-                stats.eventsReceived += data.events.length;
+        case 'event': {
+            // Live frames put the payload on `event`; `data` mirrors it.
+            const payload = msg.event || data || {};
+            if (payload.events) {
+                receivedEvents.push(...payload.events);
+                stats.eventsReceived += payload.events.length;
             } else {
-                receivedEvents.push(data);
+                receivedEvents.push(payload);
                 stats.eventsReceived++;
             }
+            break;
+        }
+
+        case 'hello':
+            console.log('[STUB-WS] Extension hello', {
+                client_id: msg.client_id || msg.clientId,
+                version: msg.extension_version
+            });
+            break;
+
+        case 'progress':
+            // Long-running job progress; nothing to assert on in the stub.
             break;
 
         case 'pong':

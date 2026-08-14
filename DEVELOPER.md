@@ -13,17 +13,19 @@ Technical reference for cortex_server implementors and extension contributors.
 │                 │   /tbird-sync/ws   │                  │
 └─────────────────┘                    └──────────────────┘
       │                                        │
-      │  ─── {type:"command", data:{...}} ───▶ │
-      │  ◀── {type:"result", data:{...}} ────  │
-      │  ◀── {type:"event", data:{...}} ─────  │
+      │  ─── {type:"command",  data:{...}} ──▶ │
+      │  ─── {type:"commands", commands:[]} ─▶ │
+      │  ◀── {type:"hello",    client_id} ───  │
+      │  ◀── {type:"results",  results:[]} ──  │
+      │  ◀── {type:"event",    event:{...}} ─  │
       │  ─── {type:"ping"} ─────────────────▶  │
       │  ◀── {type:"pong"} ─────────────────── │
 ```
 
-1. Extension connects to WebSocket on startup
+1. Extension connects to WebSocket on startup and sends `hello`
 2. Server pushes commands in real-time
 3. Extension executes commands via `messenger.messages.update()`
-4. Extension sends results/events back via WebSocket
+4. Extension sends results/events back via WebSocket, **batched**
 5. Auto-reconnect with exponential backoff (1s -> 2s -> 4s -> ... -> 30s max)
 
 ## Server Endpoints
@@ -38,16 +40,49 @@ Bidirectional WebSocket for real-time communication.
 
 **Server → Extension messages:**
 ```json
-{"type": "command", "data": {"id": "uuid", "action": "mark_read", "messageId": "..."}}
-{"type": "ping", "data": {}}
+{"type": "command",  "data": {"id": "uuid", "action": "mark_read", "messageId": "..."}}
+{"type": "commands", "commands": [{"id": "uuid", "action": "mark_read"}, ...]}
+{"type": "ping"}
 ```
+
+Both command forms are accepted. `command` carries a single command; the payload is
+read from `data`, falling back to `command`, then to the frame itself. `commands`
+carries a batch — this is what cortex_server actually sends.
 
 **Extension → Server messages:**
 ```json
-{"type": "result", "data": {"id": "uuid", "success": true, "action": "mark_read"}}
-{"type": "event", "data": {"event_type": "messages.onNewMailReceived", ...}}
-{"type": "pong", "data": {"timestamp": 1234567890}}
+{"type": "hello",   "client_id": "uuid", "clientId": "uuid", "extension_version": "1.6.7"}
+{"type": "results", "client_id": "uuid", "results": [{"id": "uuid", "success": true, "action": "mark_read"}, ...]}
+{"type": "event",   "event": {"event_type": "messages.onNewMailReceived", ...}}
+{"type": "pong",    "client_id": "uuid", "data": {"timestamp": 1234567890}}
 ```
+
+**Results are plural and batched.** `flushCompletions()` sends `type: "results"` with a
+`results` array of **up to 25** completions per frame — never a singular `result`.
+Servers must iterate the array. The same payload is mirrored on `data` for
+compatibility; `results` is authoritative.
+
+Frames also carry `client_id` and `clientId` (both casings) at the top level, and
+results are stamped with the same pair.
+
+#### Command ID rules
+
+The `id` field is the only correlation handle, and two cases fail **silently**:
+
+| Case | Behaviour |
+|---|---|
+| `id` missing or empty | Command is dropped. Logged to the debug ring only. |
+| `id` already in flight | Command is dropped as a duplicate. No result is ever sent. |
+
+`enqueueCommands()` tracks seen ids in `knownCommandIds` and only clears an id once
+its result has been flushed. **Always issue a fresh unique id per command** — reusing
+one before its result returns means the caller waits forever. Retries must allocate a
+new id.
+
+#### Progress frames
+
+Long-running jobs may emit `{"type": "progress", "data": {...}}`. Servers that do not
+consume progress should ignore unknown frame types rather than erroring.
 
 ### Server-Side Endpoints (not called by extension)
 
@@ -96,6 +131,30 @@ Bidirectional WebSocket for real-time communication.
 | Action | Description |
 |--------|-------------|
 | `rpc` | Execute an allowlisted Thunderbird WebExtension method (`method`, `args`) |
+
+Allowlisted prefixes: `cortex.`, `messages.`, `compose.`, `folders.`, `accounts.`,
+`identities.`, `addressBooks.`. Listener methods (`addListener`, `removeListener`,
+`hasListener`, and any `on*` segment) are always rejected. Responses are
+`{"success": true, "action": "rpc", "method": "...", "result": <JSON-safe value>}`.
+
+#### `messages.query` scoping
+
+`rpc` does not pass `messages.query` straight through — it rewrites the query first:
+
+- **`accountId` alone is not an account-wide filter.** It is converted into a folder
+  scope of `{accountId, path: "/INBOX"}`, so the query silently returns inbox results
+  only, hiding every other folder in that account. To search a whole account, omit
+  `accountId` and filter results by `folder.accountId` on the caller side; to search
+  one folder, pass `folder` explicitly.
+- `folder` / `folderId` are resolved via `resolveRpcFolder()`. If a scope is requested
+  but cannot be resolved, the call fails rather than silently widening.
+- `fromDate` is parsed to a `Date`; `unreadOnly: true` is mapped to `unread: true`;
+  `limit` and `includeBody` are stripped before reaching Thunderbird and applied by
+  the extension.
+- Results are re-filtered against the resolved scope, and a scope mismatch is an error.
+
+Inbox path casing varies by provider (`/INBOX` vs `/Inbox`); callers should be
+prepared to retry with the alternate casing.
 
 ### Audit RPCs
 
