@@ -2299,30 +2299,183 @@ function normalizeRpcArgs(rawArgs) {
     return [];
 }
 
-function matchesQueryFilters(message, { fromDateMs = null, unreadFilter = null } = {}) {
+/**
+ * Query fields that `queryFolderMessagesCompat` evaluates itself rather than handing to
+ * `messenger.messages.query`. Any of these appearing on a folder-scoped query must route
+ * through the compat path, or the filter is silently discarded.
+ */
+const COMPAT_QUERY_FILTER_KEYS = Object.freeze([
+    "author",
+    "subject",
+    "recipients",
+    "text",
+    "tags",
+    "flagged",
+    "toDate",
+    "headerMessageId"
+]);
+
+/**
+ * Flatten a MessageHeader field that may be a string, an array of strings, or absent into
+ * a single lowercase string suitable for substring matching.
+ */
+function queryFieldToSearchText(value) {
+    if (value == null) return "";
+    if (Array.isArray(value)) {
+        return value.map((entry) => (entry == null ? "" : String(entry))).join(" ").toLowerCase();
+    }
+    return String(value).toLowerCase();
+}
+
+/**
+ * Case-insensitive substring match. An absent or blank needle matches everything, so an
+ * unset filter never removes results.
+ */
+function querySubstringMatches(haystack, needle) {
+    if (needle == null) return true;
+    const term = String(needle).trim().toLowerCase();
+    if (!term) return true;
+    return queryFieldToSearchText(haystack).includes(term);
+}
+
+/** Strip the angle brackets Message-IDs are usually quoted with, and lowercase. */
+function normalizeHeaderMessageIdForMatch(value) {
+    let id = String(value == null ? "" : value).trim();
+    if (id.startsWith("<")) id = id.slice(1);
+    if (id.endsWith(">")) id = id.slice(0, -1);
+    return id.toLowerCase();
+}
+
+/**
+ * Match against a Thunderbird tag spec: `{ mode: "any"|"all", tags: [...] }`.
+ * A bare array is treated as mode "any".
+ */
+function matchesQueryTags(message, tagSpec) {
+    if (tagSpec == null) return true;
+    const spec = Array.isArray(tagSpec) ? { mode: "any", tags: tagSpec } : tagSpec;
+    const wanted = Array.isArray(spec.tags)
+        ? spec.tags.map((tag) => String(tag == null ? "" : tag).trim().toLowerCase()).filter(Boolean)
+        : [];
+    if (wanted.length === 0) return true;
+    const have = Array.isArray(message && message.tags)
+        ? message.tags.map((tag) => String(tag == null ? "" : tag).trim().toLowerCase()).filter(Boolean)
+        : [];
+    const mode = String(spec.mode || "any").toLowerCase();
+    if (mode === "all") return wanted.every((tag) => have.includes(tag));
+    return wanted.some((tag) => have.includes(tag));
+}
+
+/**
+ * Build the compat filter set from a raw queryInfo.
+ *
+ * Kept separate from `matchesQueryFilters` so the RPC handler and the compat pager agree
+ * on exactly which fields are honoured — the two drifting apart is what caused author,
+ * subject and toDate to be silently dropped on every folder-scoped query.
+ */
+function buildCompatQueryFilters(queryInfo) {
+    const qi = queryInfo && typeof queryInfo === "object" ? queryInfo : {};
+    const unreadFilter = qi.unreadOnly === true
+        ? true
+        : (typeof qi.unread === "boolean" ? qi.unread : null);
+    return {
+        fromDateMs: parseRpcDateMs(qi.fromDate),
+        toDateMs: parseRpcDateMs(qi.toDate),
+        unreadFilter,
+        flaggedFilter: typeof qi.flagged === "boolean" ? qi.flagged : null,
+        author: qi.author == null ? null : qi.author,
+        subject: qi.subject == null ? null : qi.subject,
+        recipients: qi.recipients == null ? null : qi.recipients,
+        text: qi.text == null ? null : qi.text,
+        tags: qi.tags == null ? null : qi.tags,
+        headerMessageId: qi.headerMessageId == null ? null : qi.headerMessageId
+    };
+}
+
+/** True when any filter narrows the result set beyond "everything in this folder". */
+function compatFiltersNarrowResults(filters) {
+    if (!filters || typeof filters !== "object") return false;
+    if (typeof filters.unreadFilter === "boolean") return true;
+    if (typeof filters.flaggedFilter === "boolean") return true;
+    if (Number.isFinite(filters.fromDateMs)) return true;
+    if (Number.isFinite(filters.toDateMs)) return true;
+    for (const key of ["author", "subject", "recipients", "text", "headerMessageId"]) {
+        if (filters[key] != null && String(filters[key]).trim()) return true;
+    }
+    if (filters.tags != null) {
+        const spec = Array.isArray(filters.tags) ? { tags: filters.tags } : filters.tags;
+        if (Array.isArray(spec && spec.tags) && spec.tags.length > 0) return true;
+    }
+    return false;
+}
+
+function matchesQueryFilters(message, filters = {}) {
+    const {
+        fromDateMs = null,
+        toDateMs = null,
+        unreadFilter = null,
+        flaggedFilter = null,
+        author = null,
+        subject = null,
+        recipients = null,
+        text = null,
+        tags = null,
+        headerMessageId = null
+    } = filters || {};
+
     if (!message || typeof message !== "object") return false;
+
     if (typeof unreadFilter === "boolean") {
         const isUnread = !Boolean(message.read);
         if (isUnread !== unreadFilter) return false;
+    }
+    if (typeof flaggedFilter === "boolean") {
+        if (Boolean(message.flagged) !== flaggedFilter) return false;
     }
     if (typeof fromDateMs === "number" && Number.isFinite(fromDateMs)) {
         const msgMs = getMessageDateMs(message);
         if (msgMs === null || msgMs < fromDateMs) return false;
     }
+    if (typeof toDateMs === "number" && Number.isFinite(toDateMs)) {
+        const msgMs = getMessageDateMs(message);
+        if (msgMs === null || msgMs > toDateMs) return false;
+    }
+    if (!querySubstringMatches(message.author, author)) return false;
+    if (!querySubstringMatches(message.subject, subject)) return false;
+    if (!querySubstringMatches(message.recipients, recipients)) return false;
+
+    if (headerMessageId != null && String(headerMessageId).trim()) {
+        const wanted = normalizeHeaderMessageIdForMatch(headerMessageId);
+        if (normalizeHeaderMessageIdForMatch(message.headerMessageId) !== wanted) return false;
+    }
+
+    if (text != null && String(text).trim()) {
+        const term = String(text).trim().toLowerCase();
+        const haystack = [
+            queryFieldToSearchText(message.subject),
+            queryFieldToSearchText(message.author),
+            queryFieldToSearchText(message.recipients)
+        ].join(" ");
+        if (!haystack.includes(term)) return false;
+    }
+
+    if (!matchesQueryTags(message, tags)) return false;
+
     return true;
 }
 
 async function queryFolderMessagesCompat(folder, queryInfo) {
     const requestedLimit = toPositiveInt(queryInfo && queryInfo.limit, 100, 5000);
     const limit = Math.max(1, requestedLimit);
-    const unreadFilter = (queryInfo && queryInfo.unreadOnly === true)
-        ? true
-        : ((queryInfo && typeof queryInfo.unread === "boolean") ? queryInfo.unread : null);
-    const fromDateMs = parseRpcDateMs(queryInfo && queryInfo.fromDate);
+    const filters = buildCompatQueryFilters(queryInfo);
+    const fromDateMs = filters.fromDateMs;
+    const isNarrowed = compatFiltersNarrowResults(filters);
 
     // Keep this within the outer command timeout budget.
     const deadlineMs = Date.now() + 24000;
-    const maxPages = fromDateMs !== null ? 60 : Math.max(6, Math.ceil(limit / 100) + 2);
+    // A narrowing filter can leave matches deep in the folder, so the shallow page budget
+    // that suits an unfiltered listing would truncate the result set. Use the wide budget
+    // whenever anything is actually being filtered on, not only for date cutoffs.
+    const maxPages = isNarrowed ? 60 : Math.max(6, Math.ceil(limit / 100) + 2);
     const pageSize = Math.max(50, Math.min(500, Math.max(limit, 100)));
     const seen = new Set();
     const collected = [];
@@ -2333,7 +2486,7 @@ async function queryFolderMessagesCompat(folder, queryInfo) {
         pages += 1;
         const pageMessages = Array.isArray(page.messages) ? page.messages : [];
         for (const msg of pageMessages) {
-            if (!matchesQueryFilters(msg, { fromDateMs, unreadFilter })) continue;
+            if (!matchesQueryFilters(msg, filters)) continue;
             const key = String(
                 msg.id != null
                     ? msg.id
@@ -2996,6 +3149,10 @@ async function executeRpcCommand(cmd) {
             if (fromDateMs !== null) {
                 queryInfo.fromDate = new Date(fromDateMs);
             }
+            const toDateMs = parseRpcDateMs(queryInfo.toDate);
+            if (toDateMs !== null) {
+                queryInfo.toDate = new Date(toDateMs);
+            }
             if (queryInfo.unreadOnly === true && typeof queryInfo.unread !== "boolean") {
                 queryInfo.unread = true;
             }
@@ -3004,12 +3161,31 @@ async function executeRpcCommand(cmd) {
             delete nativeQuery.includeBody;
             delete nativeQuery.limit;
             delete nativeQuery.unreadOnly;
+            // `text` is not a MessageHeader query property. Thunderbird rejects the whole
+            // call with a type error if it is present, so it never reaches the native path.
+            delete nativeQuery.text;
+
+            const requestedCompatFilters = COMPAT_QUERY_FILTER_KEYS.filter(
+                (key) => Object.prototype.hasOwnProperty.call(original, key)
+            );
 
             const shouldUseCompatFolderQuery = Boolean(queryInfo.folder) && (
                 fromDateMs !== null ||
+                requestedCompatFilters.length > 0 ||
                 Object.prototype.hasOwnProperty.call(original, "limit") ||
                 Object.prototype.hasOwnProperty.call(original, "unreadOnly")
             );
+
+            // Only the compat pager can evaluate a free-text match. Refusing loudly beats
+            // returning an unfiltered folder listing that reads as "no matches".
+            if (!shouldUseCompatFolderQuery && Object.prototype.hasOwnProperty.call(original, "text")) {
+                return {
+                    success: false,
+                    action: "rpc",
+                    method,
+                    error: "messages.query 'text' requires a folder or accountId scope; Thunderbird has no native free-text message property."
+                };
+            }
 
             if (shouldUseCompatFolderQuery) {
                 result = await queryFolderMessagesCompat(queryInfo.folder, queryInfo);
@@ -4525,6 +4701,16 @@ if (typeof module !== "undefined" && module && module.exports) {
         TBIRD_NOT_BIDIRECTIONALLY_SYNCED_ATTRIBUTES,
         findMessageByHeaderId,
         findFolder,
+
+        // Folder-scoped query compat layer
+        matchesQueryFilters,
+        buildCompatQueryFilters,
+        compatFiltersNarrowResults,
+        matchesQueryTags,
+        querySubstringMatches,
+        queryFieldToSearchText,
+        queryFolderMessagesCompat,
+        COMPAT_QUERY_FILTER_KEYS,
 
         // Action handlers
         markAsRead,
